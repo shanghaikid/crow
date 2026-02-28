@@ -141,7 +141,7 @@ pub struct PacketLogEntry {
     pub info: String, // "TLS → example.com", "GET /api/data", "DNS ? example.com"
 }
 
-const MAX_PACKET_LOG: usize = 100;
+const MAX_PACKET_LOG: usize = 5000;
 
 /// Per-process network information.
 pub struct ProcessInfo {
