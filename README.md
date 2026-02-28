@@ -71,7 +71,17 @@ Select a process and press **v** to open a full-screen packet log showing all ca
 - `GET /api/data` — HTTP request method and path
 - `DNS example.com -> 3 addr` — DNS resolution results
 
-Each entry shows timestamp, direction (^ upload / v download), and packet size. Use **j/k** to scroll, **g/G** to jump to top/bottom, **Esc** to go back.
+Each entry shows a millisecond-precision local timestamp (e.g. `19:04:43.217`), direction (^ upload / v download), and packet size.
+
+| Key | Action |
+|-----|--------|
+| **j/k** or **Up/Down** | Scroll one line |
+| **Space/f/PageDown** | Page down |
+| **b/PageUp** | Page up |
+| **d/u** | Half page down/up |
+| **g/Home** | Jump to top |
+| **G/End** | Jump to bottom |
+| **Esc/q** | Back to process list |
 
 ### CLI Options
 

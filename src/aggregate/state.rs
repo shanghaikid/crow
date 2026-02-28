@@ -133,7 +133,8 @@ impl Connection {
 /// A recent packet activity log entry.
 #[allow(dead_code)]
 pub struct PacketLogEntry {
-    pub elapsed_secs: f64,
+    /// Local time as (hour, minute, second, millisecond).
+    pub time_hms: (u8, u8, u8, u16),
     pub direction: Direction,
     pub remote: SocketAddr,
     pub size: u32,

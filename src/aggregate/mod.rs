@@ -146,9 +146,8 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
 
     // Record packet log if there's interesting protocol info
     if let Some(ref info) = event.protocol_info {
-        let elapsed = now.duration_since(app.started_at).as_secs_f64();
         proc_info.push_log(PacketLogEntry {
-            elapsed_secs: elapsed,
+            time_hms: local_hms(),
             direction: event.direction,
             remote: remote_addr,
             size: event.payload_len,
@@ -298,4 +297,30 @@ fn prune_closed_connections(app: &mut AppState) {
                 || !matches!(c.state, TcpState::Closed | TcpState::TimeWait)
         });
     }
+}
+
+/// Get current local time as (hour, minute, second, millisecond).
+fn local_hms() -> (u8, u8, u8, u16) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    let millis = dur.subsec_millis() as u16;
+    extern "C" {
+        fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+    }
+    #[repr(C)]
+    struct Tm {
+        tm_sec: i32,
+        tm_min: i32,
+        tm_hour: i32,
+        _rest: [i32; 6],
+        _gmtoff: isize,
+        _zone: *const u8,
+    }
+    let time = secs as i64;
+    let mut tm = unsafe { std::mem::zeroed::<Tm>() };
+    unsafe { localtime_r(&time, &mut tm) };
+    (tm.tm_hour as u8, tm.tm_min as u8, tm.tm_sec as u8, millis)
 }

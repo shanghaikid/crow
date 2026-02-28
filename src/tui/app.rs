@@ -67,13 +67,16 @@ fn run_loop(
                 {
                     let in_detail = state.read().unwrap().detail_pid.is_some();
                     if in_detail {
+                        let page_size = terminal.size().map(|s| s.height.saturating_sub(4) as usize).unwrap_or(20);
+                        let half_page = page_size / 2;
                         match key.code {
                             KeyCode::Esc | KeyCode::Char('q') => {
                                 let mut app = state.write().unwrap();
                                 app.detail_pid = None;
                                 app.detail_scroll = 0;
                             }
-                            KeyCode::Char('j') | KeyCode::Down => {
+                            // Single line: j/k, Up/Down, Enter(down)
+                            KeyCode::Char('j') | KeyCode::Down | KeyCode::Enter => {
                                 let mut app = state.write().unwrap();
                                 app.detail_scroll = app.detail_scroll.saturating_add(1);
                             }
@@ -81,11 +84,31 @@ fn run_loop(
                                 let mut app = state.write().unwrap();
                                 app.detail_scroll = app.detail_scroll.saturating_sub(1);
                             }
-                            KeyCode::Char('g') => {
+                            // Page down: Space, f, PageDown
+                            KeyCode::Char(' ') | KeyCode::Char('f') | KeyCode::PageDown => {
+                                let mut app = state.write().unwrap();
+                                app.detail_scroll = app.detail_scroll.saturating_add(page_size);
+                            }
+                            // Page up: b, PageUp
+                            KeyCode::Char('b') | KeyCode::PageUp => {
+                                let mut app = state.write().unwrap();
+                                app.detail_scroll = app.detail_scroll.saturating_sub(page_size);
+                            }
+                            // Half page: d(down), u(up)
+                            KeyCode::Char('d') => {
+                                let mut app = state.write().unwrap();
+                                app.detail_scroll = app.detail_scroll.saturating_add(half_page);
+                            }
+                            KeyCode::Char('u') => {
+                                let mut app = state.write().unwrap();
+                                app.detail_scroll = app.detail_scroll.saturating_sub(half_page);
+                            }
+                            // Top/Bottom: g/G
+                            KeyCode::Char('g') | KeyCode::Home => {
                                 let mut app = state.write().unwrap();
                                 app.detail_scroll = 0;
                             }
-                            KeyCode::Char('G') => {
+                            KeyCode::Char('G') | KeyCode::End => {
                                 let mut app = state.write().unwrap();
                                 let pid = app.detail_pid.unwrap();
                                 let total = app.processes.get(&pid)

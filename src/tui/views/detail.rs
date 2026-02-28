@@ -38,7 +38,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState) {
             ),
             Style::default().fg(Color::White),
         ),
-        Span::styled("  [Esc] Back  [j/k] Scroll", Style::default().fg(Color::DarkGray)),
+        Span::styled("  [Esc]Back [j/k]Line [f/b]Page [d/u]Half [g/G]Top/End", Style::default().fg(Color::DarkGray)),
     ]);
 
     let block = Block::default()
@@ -61,7 +61,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState) {
         .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
 
     let widths = [
-        Constraint::Length(8),
+        Constraint::Length(13),
         Constraint::Length(4),
         Constraint::Min(30),
         Constraint::Length(10),
@@ -82,7 +82,8 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState) {
                 Direction::Outbound => ("^", Color::Red),
                 Direction::Inbound => ("v", Color::Blue),
             };
-            let ts = format_log_time(entry.elapsed_secs);
+            let (h, m, s, ms) = entry.time_hms;
+            let ts = format!("{h:02}:{m:02}:{s:02}.{ms:03}");
             Row::new(vec![
                 ts,
                 arrow.to_string(),
@@ -100,9 +101,3 @@ pub fn render(f: &mut Frame, area: Rect, state: &AppState) {
     f.render_widget(table, inner);
 }
 
-fn format_log_time(elapsed_secs: f64) -> String {
-    let secs = elapsed_secs as u64;
-    let m = secs / 60;
-    let s = secs % 60;
-    format!("{m}:{s:02}")
-}
