@@ -10,6 +10,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use libproc::libproc::file_info::{pidfdinfo, ListFDs, ProcFDType};
 use libproc::libproc::net_info::{SocketFDInfo, SocketInfoKind};
 use libproc::libproc::proc_pid;
+use libproc::processes::{pids_by_type, ProcFilter};
 
 use crate::aggregate::TcpState;
 
@@ -30,20 +31,11 @@ pub enum SocketProto {
     Udp,
 }
 
-/// Lookup key for matching captured packets to processes.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct SocketKey {
-    pub local_port: u16,
-    pub remote_ip: IpAddr,
-    pub remote_port: u16,
-}
-
 /// Result of a process lookup.
 #[derive(Debug, Clone)]
 pub struct ProcessMatch {
     pub pid: u32,
     pub name: String,
-    pub tcp_state: TcpState,
 }
 
 /// Snapshot of all process socket connections on the system.
@@ -61,7 +53,7 @@ impl SocketSnapshot {
         let mut all_conns = Vec::new();
 
         // Enumerate all PIDs
-        let pids = match proc_pid::listpids(proc_pid::ProcType::ProcAllPIDS) {
+        let pids = match pids_by_type(ProcFilter::All) {
             Ok(pids) => pids,
             Err(_) => return Self::empty(),
         };
@@ -124,7 +116,6 @@ impl SocketSnapshot {
             return Some(ProcessMatch {
                 pid: conn.pid,
                 name: conn.proc_name.clone(),
-                tcp_state: conn.tcp_state,
             });
         }
         // Try inbound: dst is local, src is remote
@@ -132,7 +123,6 @@ impl SocketSnapshot {
             return Some(ProcessMatch {
                 pid: conn.pid,
                 name: conn.proc_name.clone(),
-                tcp_state: conn.tcp_state,
             });
         }
         // Fallback: match by port
@@ -140,14 +130,12 @@ impl SocketSnapshot {
             return Some(ProcessMatch {
                 pid: conn.pid,
                 name: conn.proc_name.clone(),
-                tcp_state: conn.tcp_state,
             });
         }
         if let Some(conn) = self.lookup_by_port(dst.port(), src) {
             return Some(ProcessMatch {
                 pid: conn.pid,
                 name: conn.proc_name.clone(),
-                tcp_state: conn.tcp_state,
             });
         }
         None
@@ -158,25 +146,6 @@ impl SocketSnapshot {
         self.by_pair.values().filter(|c| c.pid == pid).collect()
     }
 
-    /// Number of distinct local ports tracked.
-    pub fn port_count(&self) -> usize {
-        self.by_local_port.len()
-    }
-
-    /// Total number of connection pairs tracked.
-    pub fn pair_count(&self) -> usize {
-        self.by_pair.len()
-    }
-
-    /// Dump a sample of connections for debugging.
-    pub fn dump_sample(&self, n: usize) {
-        for (i, ((local, remote), conn)) in self.by_pair.iter().enumerate().take(n) {
-            eprintln!(
-                "  [{}] {} (PID {}) {} -> {} {:?}",
-                i, conn.proc_name, conn.pid, local, remote, conn.protocol
-            );
-        }
-    }
 }
 
 /// Query all TCP and UDP socket connections for a given PID.

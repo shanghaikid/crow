@@ -168,7 +168,7 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
 }
 
 /// Update TCP connection states from the socket snapshot.
-fn update_connection_states(app: &mut AppState, snapshot: &SocketSnapshot, mode: CaptureMode) {
+fn update_connection_states(app: &mut AppState, snapshot: &SocketSnapshot, _mode: CaptureMode) {
     let pids: Vec<u32> = app.processes.keys().copied().collect();
 
     for pid in pids {

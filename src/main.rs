@@ -20,6 +20,10 @@ struct Cli {
     /// Interface to capture on (default: pktap,all for all interfaces)
     #[arg(short, long, default_value = "pktap,all")]
     interface: String,
+
+    /// Filter by process name (fuzzy, case-insensitive). e.g. `crow google`
+    #[arg(value_name = "PROCESS")]
+    process_filter: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -28,8 +32,12 @@ fn main() -> Result<()> {
     // Check BPF access
     check_bpf_access()?;
 
-    // Shared state
-    let state = Arc::new(RwLock::new(AppState::new()));
+    // Shared state — apply CLI process filter if provided
+    let mut app_state = AppState::new();
+    if let Some(ref filter) = cli.process_filter {
+        app_state.filter = Some(filter.clone());
+    }
+    let state = Arc::new(RwLock::new(app_state));
 
     // Open capture
     let (cap, mode) = if cli.interface == "pktap,all" {
