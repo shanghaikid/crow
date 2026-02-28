@@ -1,9 +1,10 @@
 //! macOS process introspection via libproc.
 //!
-//! Queries socket file descriptors for a given PID to discover
-//! TCP connection states (ESTABLISHED, CLOSE_WAIT, etc.) that
-//! supplement the PKTAP capture data.
+//! Enumerates all processes and their TCP/UDP socket connections to build
+//! a lookup table mapping (local_addr, remote_addr) → (PID, process name).
+//! This is the fallback approach when PKTAP headers are not available.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use libproc::libproc::file_info::{pidfdinfo, ListFDs, ProcFDType};
@@ -13,26 +14,181 @@ use libproc::libproc::proc_pid;
 use crate::aggregate::TcpState;
 
 /// A discovered socket connection for a process.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SocketConnection {
+    pub pid: u32,
+    pub proc_name: String,
     pub local_addr: SocketAddr,
     pub remote_addr: SocketAddr,
     pub tcp_state: TcpState,
+    pub protocol: SocketProto,
 }
 
-/// Query all TCP socket connections for a given PID.
-/// Returns an empty Vec if the process has exited or we lack permissions.
-pub fn get_process_connections(pid: i32) -> Vec<SocketConnection> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketProto {
+    Tcp,
+    Udp,
+}
+
+/// Lookup key for matching captured packets to processes.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct SocketKey {
+    pub local_port: u16,
+    pub remote_ip: IpAddr,
+    pub remote_port: u16,
+}
+
+/// Result of a process lookup.
+#[derive(Debug, Clone)]
+pub struct ProcessMatch {
+    pub pid: u32,
+    pub name: String,
+    pub tcp_state: TcpState,
+}
+
+/// Snapshot of all process socket connections on the system.
+/// Used to attribute captured packets to processes.
+pub struct SocketSnapshot {
+    /// Map from socket key → process info (for outbound matching by local port)
+    by_local_port: HashMap<u16, Vec<SocketConnection>>,
+    /// All connections indexed by (local, remote) pair
+    by_pair: HashMap<(SocketAddr, SocketAddr), SocketConnection>,
+}
+
+impl SocketSnapshot {
+    /// Build a snapshot of all process sockets on the system.
+    pub fn capture() -> Self {
+        let mut all_conns = Vec::new();
+
+        // Enumerate all PIDs
+        let pids = match proc_pid::listpids(proc_pid::ProcType::ProcAllPIDS) {
+            Ok(pids) => pids,
+            Err(_) => return Self::empty(),
+        };
+
+        for pid in pids {
+            if pid == 0 {
+                continue;
+            }
+            let name = proc_pid::name(pid as i32).unwrap_or_default();
+            let conns = get_process_connections(pid as i32, &name);
+            all_conns.extend(conns);
+        }
+
+        let mut by_local_port: HashMap<u16, Vec<SocketConnection>> = HashMap::new();
+        let mut by_pair: HashMap<(SocketAddr, SocketAddr), SocketConnection> = HashMap::new();
+
+        for conn in all_conns {
+            by_local_port
+                .entry(conn.local_addr.port())
+                .or_default()
+                .push(conn.clone());
+            by_pair.insert((conn.local_addr, conn.remote_addr), conn);
+        }
+
+        Self {
+            by_local_port,
+            by_pair,
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            by_local_port: HashMap::new(),
+            by_pair: HashMap::new(),
+        }
+    }
+
+    /// Look up a process by exact (local, remote) address pair.
+    pub fn lookup_exact(&self, local: &SocketAddr, remote: &SocketAddr) -> Option<&SocketConnection> {
+        self.by_pair.get(&(*local, *remote))
+    }
+
+    /// Look up a process by local port and remote address.
+    /// Falls back to matching just by local port if exact remote doesn't match.
+    pub fn lookup_by_port(&self, local_port: u16, remote: &SocketAddr) -> Option<&SocketConnection> {
+        let candidates = self.by_local_port.get(&local_port)?;
+        // Try exact remote match first
+        if let Some(conn) = candidates.iter().find(|c| c.remote_addr == *remote) {
+            return Some(conn);
+        }
+        // Fall back to any connection on this local port
+        candidates.first()
+    }
+
+    /// Match a captured packet (src, dst) to a process.
+    /// Tries both directions: src as local (outbound) and dst as local (inbound).
+    pub fn match_packet(&self, src: &SocketAddr, dst: &SocketAddr) -> Option<ProcessMatch> {
+        // Try outbound: src is local, dst is remote
+        if let Some(conn) = self.lookup_exact(src, dst) {
+            return Some(ProcessMatch {
+                pid: conn.pid,
+                name: conn.proc_name.clone(),
+                tcp_state: conn.tcp_state,
+            });
+        }
+        // Try inbound: dst is local, src is remote
+        if let Some(conn) = self.lookup_exact(dst, src) {
+            return Some(ProcessMatch {
+                pid: conn.pid,
+                name: conn.proc_name.clone(),
+                tcp_state: conn.tcp_state,
+            });
+        }
+        // Fallback: match by port
+        if let Some(conn) = self.lookup_by_port(src.port(), dst) {
+            return Some(ProcessMatch {
+                pid: conn.pid,
+                name: conn.proc_name.clone(),
+                tcp_state: conn.tcp_state,
+            });
+        }
+        if let Some(conn) = self.lookup_by_port(dst.port(), src) {
+            return Some(ProcessMatch {
+                pid: conn.pid,
+                name: conn.proc_name.clone(),
+                tcp_state: conn.tcp_state,
+            });
+        }
+        None
+    }
+
+    /// Get all connections for a specific PID.
+    pub fn connections_for_pid(&self, pid: u32) -> Vec<&SocketConnection> {
+        self.by_pair.values().filter(|c| c.pid == pid).collect()
+    }
+
+    /// Number of distinct local ports tracked.
+    pub fn port_count(&self) -> usize {
+        self.by_local_port.len()
+    }
+
+    /// Total number of connection pairs tracked.
+    pub fn pair_count(&self) -> usize {
+        self.by_pair.len()
+    }
+
+    /// Dump a sample of connections for debugging.
+    pub fn dump_sample(&self, n: usize) {
+        for (i, ((local, remote), conn)) in self.by_pair.iter().enumerate().take(n) {
+            eprintln!(
+                "  [{}] {} (PID {}) {} -> {} {:?}",
+                i, conn.proc_name, conn.pid, local, remote, conn.protocol
+            );
+        }
+    }
+}
+
+/// Query all TCP and UDP socket connections for a given PID.
+fn get_process_connections(pid: i32, name: &str) -> Vec<SocketConnection> {
     let mut connections = Vec::new();
 
-    // List all file descriptors for the process
     let fds = match proc_pid::listpidinfo::<ListFDs>(pid, 256) {
         Ok(fds) => fds,
         Err(_) => return connections,
     };
 
     for fd_info in fds {
-        // Only interested in socket FDs
         if fd_info.proc_fdtype != ProcFDType::Socket as u32 {
             continue;
         }
@@ -44,18 +200,28 @@ pub fn get_process_connections(pid: i32) -> Vec<SocketConnection> {
 
         let si = &socket_info.psi;
 
-        // Only interested in TCP sockets
-        if si.soi_kind != SocketInfoKind::Tcp as i32 {
-            continue;
-        }
+        let (proto, state) = match si.soi_kind {
+            kind if kind == SocketInfoKind::Tcp as i32 => {
+                let tcp_info = unsafe { si.soi_proto.pri_tcp };
+                (SocketProto::Tcp, tcp_state_from_raw(tcp_info.tcpsi_state))
+            }
+            kind if kind == SocketInfoKind::In as i32 => {
+                // Generic internet socket — likely UDP
+                (SocketProto::Udp, TcpState::Unknown)
+            }
+            _ => continue,
+        };
 
-        // Extract TCP-specific info (union access requires unsafe)
-        let tcp_info = unsafe { si.soi_proto.pri_tcp };
-        let inet_info = &tcp_info.tcpsi_ini;
+        let inet_info = match si.soi_kind {
+            kind if kind == SocketInfoKind::Tcp as i32 => {
+                unsafe { &si.soi_proto.pri_tcp.tcpsi_ini }
+            }
+            kind if kind == SocketInfoKind::In as i32 => {
+                unsafe { &si.soi_proto.pri_in }
+            }
+            _ => continue,
+        };
 
-        let state = tcp_state_from_raw(tcp_info.tcpsi_state);
-
-        // Determine IPv4 vs IPv6 from the vflag
         let (local_addr, remote_addr) = if inet_info.insi_vflag == 1 {
             // IPv4
             let local_ip = unsafe {
@@ -66,9 +232,10 @@ pub fn get_process_connections(pid: i32) -> Vec<SocketConnection> {
                 let bytes = inet_info.insi_faddr.ina_46.i46a_addr4.s_addr;
                 IpAddr::V4(Ipv4Addr::from(u32::from_be(bytes)))
             };
-            let local = SocketAddr::new(local_ip, inet_info.insi_lport as u16);
-            let remote = SocketAddr::new(remote_ip, inet_info.insi_fport as u16);
-            (local, remote)
+            (
+                SocketAddr::new(local_ip, (inet_info.insi_lport as u16).swap_bytes()),
+                SocketAddr::new(remote_ip, (inet_info.insi_fport as u16).swap_bytes()),
+            )
         } else {
             // IPv6
             let local_ip = unsafe {
@@ -79,15 +246,27 @@ pub fn get_process_connections(pid: i32) -> Vec<SocketConnection> {
                 let bytes = inet_info.insi_faddr.ina_6.s6_addr;
                 IpAddr::V6(Ipv6Addr::from(bytes))
             };
-            let local = SocketAddr::new(local_ip, inet_info.insi_lport as u16);
-            let remote = SocketAddr::new(remote_ip, inet_info.insi_fport as u16);
-            (local, remote)
+            (
+                SocketAddr::new(local_ip, (inet_info.insi_lport as u16).swap_bytes()),
+                SocketAddr::new(remote_ip, (inet_info.insi_fport as u16).swap_bytes()),
+            )
         };
 
+        // Skip listen sockets with no remote
+        if remote_addr.port() == 0
+            && remote_addr.ip().is_unspecified()
+            && proto == SocketProto::Tcp
+        {
+            continue;
+        }
+
         connections.push(SocketConnection {
+            pid: pid as u32,
+            proc_name: name.to_string(),
             local_addr,
             remote_addr,
             tcp_state: state,
+            protocol: proto,
         });
     }
 

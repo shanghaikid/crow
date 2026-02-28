@@ -11,24 +11,51 @@ use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::process::macos;
+use crate::capture::CaptureMode;
+use crate::process::macos::{self, SocketSnapshot};
 
 /// Run the aggregator loop. Consumes PacketEvents from the channel and
-/// updates shared AppState. Also periodically polls process connections.
+/// updates shared AppState. In RawIp mode, uses periodic socket snapshots
+/// to attribute packets to processes.
 ///
 /// This function blocks and should be called from a dedicated thread.
 pub fn aggregator_loop(
     rx: mpsc::Receiver<PacketEvent>,
     state: Arc<RwLock<AppState>>,
+    mode: CaptureMode,
 ) {
-    let mut last_conn_poll = Instant::now();
-    let conn_poll_interval = Duration::from_millis(500);
+    let mut last_snapshot = Instant::now();
+    let snapshot_interval = Duration::from_millis(500);
     let process_expiry = Duration::from_secs(30);
+
+    // Initial socket snapshot for raw IP mode
+    let mut snapshot = if mode == CaptureMode::RawIp {
+        SocketSnapshot::capture()
+    } else {
+        SocketSnapshot::empty()
+    };
 
     loop {
         // Try to receive with a short timeout so we can do periodic work
         match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(event) => {
+            Ok(mut event) => {
+                // In raw IP mode, resolve PID via socket matching
+                if mode == CaptureMode::RawIp && event.pid == 0 {
+                    if let Some(m) = snapshot.match_packet(&event.src, &event.dst) {
+                        event.pid = m.pid;
+                        event.proc_name = m.name;
+                        // Determine direction: if src port matches a local socket, it's outbound
+                        if snapshot.lookup_by_port(event.src.port(), &event.dst).is_some() {
+                            event.direction = Direction::Outbound;
+                        } else {
+                            event.direction = Direction::Inbound;
+                        }
+                    } else {
+                        // Can't attribute this packet — skip it
+                        continue;
+                    }
+                }
+
                 let mut app = state.write().unwrap();
                 process_event(&mut app, event);
             }
@@ -38,11 +65,16 @@ pub fn aggregator_loop(
 
         let now = Instant::now();
 
-        // Periodic connection state polling
-        if now.duration_since(last_conn_poll) >= conn_poll_interval {
-            last_conn_poll = now;
+        // Periodic snapshot refresh and connection state polling
+        if now.duration_since(last_snapshot) >= snapshot_interval {
+            last_snapshot = now;
+
+            if mode == CaptureMode::RawIp {
+                snapshot = SocketSnapshot::capture();
+            }
+
             let mut app = state.write().unwrap();
-            poll_connections(&mut app);
+            update_connection_states(&mut app, &snapshot, mode);
             expire_processes(&mut app, now, process_expiry);
             app.dns_cache.prune_expired();
         }
@@ -76,9 +108,8 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
     proc_info.last_seen = now;
     proc_info.alive = true;
 
-    // Update the process name if we got a better one
     if !event.proc_name.is_empty() && proc_info.name.is_empty() {
-        proc_info.name = event.proc_name.clone();
+        proc_info.name.clone_from(&event.proc_name);
     }
 
     match event.direction {
@@ -86,7 +117,7 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
         Direction::Inbound => proc_info.bytes_rx.add(event.payload_len as u64, now),
     }
 
-    // Update or create connection entry
+    // Determine local/remote addresses
     let remote_addr = match event.direction {
         Direction::Outbound => event.dst,
         Direction::Inbound => event.src,
@@ -136,15 +167,14 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
     }
 }
 
-/// Poll libproc for TCP connection states for all tracked processes.
-fn poll_connections(app: &mut AppState) {
+/// Update TCP connection states from the socket snapshot.
+fn update_connection_states(app: &mut AppState, snapshot: &SocketSnapshot, mode: CaptureMode) {
     let pids: Vec<u32> = app.processes.keys().copied().collect();
+
     for pid in pids {
-        let sock_conns = macos::get_process_connections(pid as i32);
+        let sock_conns = snapshot.connections_for_pid(pid);
 
         if let Some(proc_info) = app.processes.get_mut(&pid) {
-            // If we got no connections and the process was previously alive,
-            // it might have exited
             if sock_conns.is_empty()
                 && proc_info.alive
                 && macos::get_process_name(pid as i32).is_none()
@@ -152,12 +182,10 @@ fn poll_connections(app: &mut AppState) {
                 proc_info.alive = false;
             }
 
-            // Update TCP states for our tracked connections
             for conn in &mut proc_info.connections {
                 if conn.protocol != Protocol::Tcp {
                     continue;
                 }
-                // Find matching socket connection by addresses
                 if let Some(sc) = sock_conns.iter().find(|sc| {
                     sc.local_addr == conn.local_addr && sc.remote_addr == conn.remote_addr
                 }) {
@@ -167,7 +195,6 @@ fn poll_connections(app: &mut AppState) {
         }
     }
 
-    // Update total connection count
     app.total_connections = app
         .processes
         .values()

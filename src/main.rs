@@ -11,6 +11,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 
 use aggregate::AppState;
+use capture::CaptureMode;
 
 /// crow — real-time per-process network monitor for macOS
 #[derive(Parser)]
@@ -31,17 +32,20 @@ fn main() -> Result<()> {
     let state = Arc::new(RwLock::new(AppState::new()));
 
     // Open capture
-    let cap = if cli.interface == "pktap,all" {
+    let (cap, mode) = if cli.interface == "pktap,all" {
         capture::open_pktap_capture()
             .context("Failed to open pktap capture")?
     } else {
-        pcap::Capture::from_device(cli.interface.as_str())
+        let c = pcap::Capture::from_device(cli.interface.as_str())
             .context("Failed to open capture device")?
             .immediate_mode(true)
             .snaplen(65535)
             .open()
-            .context("Failed to activate capture")?
+            .context("Failed to activate capture")?;
+        (c, CaptureMode::RawIp)
     };
+
+    eprintln!("crow: capture mode = {:?}", mode);
 
     // Channel for PacketEvents
     let (tx, rx) = mpsc::channel();
@@ -50,7 +54,7 @@ fn main() -> Result<()> {
     let capture_handle = thread::Builder::new()
         .name("capture".into())
         .spawn(move || {
-            if let Err(e) = capture::capture_loop(cap, tx) {
+            if let Err(e) = capture::capture_loop(cap, mode, tx) {
                 eprintln!("Capture thread error: {}", e);
             }
         })
@@ -61,15 +65,14 @@ fn main() -> Result<()> {
     let aggregator_handle = thread::Builder::new()
         .name("aggregator".into())
         .spawn(move || {
-            aggregate::aggregator_loop(rx, agg_state);
+            aggregate::aggregator_loop(rx, agg_state, mode);
         })
         .context("Failed to spawn aggregator thread")?;
 
     // Run TUI on the main thread (blocks until quit)
     let tui_result = tui::run_tui(state);
 
-    // TUI exited — capture thread will stop when its channel sender is dropped
-    // (aggregator holds the receiver, which will disconnect when we drop things)
+    // TUI exited — threads will stop when channels disconnect
     drop(capture_handle);
     drop(aggregator_handle);
 

@@ -1,8 +1,8 @@
 //! Packet parsing: raw pcap data → PacketEvent.
 //!
-//! After stripping the PKTAP header, we parse the network-layer (IP) and
-//! transport-layer (TCP/UDP) headers using pnet_packet. DNS responses on
-//! UDP port 53 are further parsed for hostname→IP mappings.
+//! Supports two modes:
+//! 1. PKTAP mode: PKTAP header provides PID/process name, then IP parsing
+//! 2. Raw IP mode: Parse IP directly, PID=0 (resolved later via socket matching)
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
@@ -26,9 +26,6 @@ const AF_INET6: u32 = 30;
 const DLT_RAW: u32 = 12;
 
 /// Parse a captured packet (with PKTAP header already stripped) into a PacketEvent.
-///
-/// `pktap` is the parsed PKTAP metadata, `inner_data` is the bytes after the
-/// PKTAP header (which may include a link-layer frame depending on inner_dlt).
 pub fn parse_packet(pktap: &PktapInfo, inner_data: &[u8], now: Instant) -> Option<PacketEvent> {
     let direction = if pktap.flags & PTH_FLAG_DIR_IN != 0 {
         Direction::Inbound
@@ -40,7 +37,6 @@ pub fn parse_packet(pktap: &PktapInfo, inner_data: &[u8], now: Instant) -> Optio
     let ip_data = if pktap.inner_dlt == DLT_RAW {
         inner_data
     } else {
-        // For Ethernet and others, use frame_pre_length from PKTAP
         let skip = pktap.frame_pre_length as usize;
         if skip >= inner_data.len() {
             return None;
@@ -52,49 +48,83 @@ pub fn parse_packet(pktap: &PktapInfo, inner_data: &[u8], now: Instant) -> Optio
         return None;
     }
 
-    match pktap.protocol_family {
-        AF_INET => parse_ipv4(ip_data, pktap, direction, now),
-        AF_INET6 => parse_ipv6(ip_data, pktap, direction, now),
-        _ => None,
+    let (src_ip, dst_ip, next_proto, payload) = match pktap.protocol_family {
+        AF_INET => parse_ip4_header(ip_data)?,
+        AF_INET6 => parse_ip6_header(ip_data)?,
+        _ => return None,
+    };
+
+    build_event(
+        next_proto,
+        payload,
+        src_ip,
+        dst_ip,
+        pktap.pid,
+        pktap.proc_name.clone(),
+        direction,
+        now,
+    )
+}
+
+/// Parse a raw IP packet (DLT_RAW mode, no PKTAP header).
+/// PID and process name are unknown (set to 0/""), to be resolved later.
+pub fn parse_raw_ip(data: &[u8], now: Instant) -> Option<PacketEvent> {
+    if data.is_empty() {
+        return None;
     }
+
+    let version = data[0] >> 4;
+    let (src_ip, dst_ip, next_proto, payload) = match version {
+        4 => parse_ip4_header(data)?,
+        6 => parse_ip6_header(data)?,
+        _ => return None,
+    };
+
+    // Direction is unknown in raw mode — will be determined by socket matching
+    build_event(
+        next_proto,
+        payload,
+        src_ip,
+        dst_ip,
+        0,
+        String::new(),
+        Direction::Outbound, // placeholder, resolved by aggregator
+        now,
+    )
 }
 
-fn parse_ipv4(
-    data: &[u8],
-    pktap: &PktapInfo,
-    direction: Direction,
-    now: Instant,
-) -> Option<PacketEvent> {
+/// Extract IP header fields from an IPv4 packet.
+fn parse_ip4_header(data: &[u8]) -> Option<(IpAddr, IpAddr, pnet_packet::ip::IpNextHeaderProtocol, &[u8])> {
     let ipv4 = Ipv4Packet::new(data)?;
-    let src_ip = IpAddr::V4(ipv4.get_source());
-    let dst_ip = IpAddr::V4(ipv4.get_destination());
-    let payload = ipv4.payload();
-    let next = ipv4.get_next_level_protocol();
-
-    parse_transport(next, payload, src_ip, dst_ip, pktap, direction, now)
+    Some((
+        IpAddr::V4(ipv4.get_source()),
+        IpAddr::V4(ipv4.get_destination()),
+        ipv4.get_next_level_protocol(),
+        // Return a sub-slice from the original data for the payload
+        // Ipv4Packet::payload() returns the correct slice
+        &data[ipv4.get_header_length() as usize * 4..],
+    ))
 }
 
-fn parse_ipv6(
-    data: &[u8],
-    pktap: &PktapInfo,
-    direction: Direction,
-    now: Instant,
-) -> Option<PacketEvent> {
+/// Extract IP header fields from an IPv6 packet.
+fn parse_ip6_header(data: &[u8]) -> Option<(IpAddr, IpAddr, pnet_packet::ip::IpNextHeaderProtocol, &[u8])> {
     let ipv6 = Ipv6Packet::new(data)?;
-    let src_ip = IpAddr::V6(ipv6.get_source());
-    let dst_ip = IpAddr::V6(ipv6.get_destination());
-    let payload = ipv6.payload();
-    let next = ipv6.get_next_header();
-
-    parse_transport(next, payload, src_ip, dst_ip, pktap, direction, now)
+    Some((
+        IpAddr::V6(ipv6.get_source()),
+        IpAddr::V6(ipv6.get_destination()),
+        ipv6.get_next_header(),
+        // IPv6 fixed header is 40 bytes
+        &data[40..],
+    ))
 }
 
-fn parse_transport(
+fn build_event(
     proto: pnet_packet::ip::IpNextHeaderProtocol,
     payload: &[u8],
     src_ip: IpAddr,
     dst_ip: IpAddr,
-    pktap: &PktapInfo,
+    pid: u32,
+    proc_name: String,
     direction: Direction,
     now: Instant,
 ) -> Option<PacketEvent> {
@@ -122,8 +152,8 @@ fn parse_transport(
 
     Some(PacketEvent {
         timestamp: now,
-        pid: pktap.pid,
-        proc_name: pktap.proc_name.clone(),
+        pid,
+        proc_name,
         direction,
         protocol,
         src: SocketAddr::new(src_ip, src_port),
@@ -133,17 +163,14 @@ fn parse_transport(
     })
 }
 
-/// If a UDP packet is from/to port 53, try to parse it as a DNS response.
+/// If a UDP packet is from port 53, try to parse it as a DNS response.
 fn parse_dns_if_applicable(src_port: u16, dst_port: u16, payload: &[u8]) -> Option<DnsInfo> {
-    // Only parse DNS responses (source port 53)
     if src_port != 53 && dst_port != 53 {
         return None;
     }
-    // Responses come from port 53
     if src_port != 53 {
         return None;
     }
-
     parse_dns_response(payload)
 }
 
@@ -151,16 +178,10 @@ fn parse_dns_if_applicable(src_port: u16, dst_port: u16, payload: &[u8]) -> Opti
 fn parse_dns_response(data: &[u8]) -> Option<DnsInfo> {
     let packet = dns_parser::Packet::parse(data).ok()?;
 
-    // We only care about responses (QR bit set and at least one answer)
-    if !packet.header.query || packet.answers.is_empty() {
-        // dns_parser inverts the QR bit: query=false means it IS a response
-        // Actually, let's just check if we have answers
-    }
     if packet.answers.is_empty() {
         return None;
     }
 
-    // Get the query name
     let query_name = packet
         .questions
         .first()
@@ -201,8 +222,18 @@ mod tests {
 
     #[test]
     fn test_parse_dns_response_empty() {
-        // Empty/garbage data should return None
         assert!(parse_dns_response(&[]).is_none());
         assert!(parse_dns_response(&[0, 1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn test_parse_raw_ip_empty() {
+        assert!(parse_raw_ip(&[], Instant::now()).is_none());
+    }
+
+    #[test]
+    fn test_parse_raw_ip_invalid_version() {
+        // Version 0 is invalid
+        assert!(parse_raw_ip(&[0x00, 0x00], Instant::now()).is_none());
     }
 }
