@@ -122,13 +122,40 @@ fn run_loop(
                     }
                 }
 
-                // Global keys (always work)
+                let page_size = terminal.size().map(|s| s.height.saturating_sub(6) as usize).unwrap_or(20);
+                let half_page = page_size / 2;
+
+                // Global keys (work in all modes including filter editing)
                 match key.code {
-                    KeyCode::Up => { move_selection(&state, -1); continue; }
-                    KeyCode::Down => { move_selection(&state, 1); continue; }
+                    // Arrow keys & PageUp/Down/Home/End navigate even during filter editing
+                    KeyCode::Up => {
+                        navigate(&state, &mut table_state, -1);
+                        continue;
+                    }
+                    KeyCode::Down => {
+                        navigate(&state, &mut table_state, 1);
+                        continue;
+                    }
+                    KeyCode::PageDown => {
+                        navigate(&state, &mut table_state, page_size as i32);
+                        continue;
+                    }
+                    KeyCode::PageUp => {
+                        navigate(&state, &mut table_state, -(page_size as i32));
+                        continue;
+                    }
+                    KeyCode::Home => {
+                        navigate_to(&state, &mut table_state, NavTarget::Top);
+                        continue;
+                    }
+                    KeyCode::End => {
+                        navigate_to(&state, &mut table_state, NavTarget::Bottom);
+                        continue;
+                    }
                     KeyCode::Tab => {
                         let mut app = state.write().unwrap();
                         app.view_mode = app.view_mode.next();
+                        table_state.select(Some(0));
                         continue;
                     }
                     _ => {}
@@ -180,15 +207,59 @@ fn run_loop(
                 // Normal mode
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Char('j') => move_selection(&state, 1),
-                    KeyCode::Char('k') => move_selection(&state, -1),
+                    // Single line: j/k
+                    KeyCode::Char('j') => navigate(&state, &mut table_state, 1),
+                    KeyCode::Char('k') => navigate(&state, &mut table_state, -1),
+                    // Page down: Space, f
+                    KeyCode::Char(' ') | KeyCode::Char('f') => {
+                        navigate(&state, &mut table_state, page_size as i32);
+                    }
+                    // Page up: b
+                    KeyCode::Char('b') => {
+                        navigate(&state, &mut table_state, -(page_size as i32));
+                    }
+                    // Half page: d(down), u(up)
+                    KeyCode::Char('d') => {
+                        navigate(&state, &mut table_state, half_page as i32);
+                    }
+                    KeyCode::Char('u') => {
+                        navigate(&state, &mut table_state, -(half_page as i32));
+                    }
+                    // Top: g
+                    KeyCode::Char('g') => {
+                        navigate_to(&state, &mut table_state, NavTarget::Top);
+                    }
+                    // Bottom: G
+                    KeyCode::Char('G') => {
+                        navigate_to(&state, &mut table_state, NavTarget::Bottom);
+                    }
                     KeyCode::Char('s') => {
                         let mut app = state.write().unwrap();
-                        if app.sort_descending {
-                            app.sort_by = app.sort_by.next();
-                            app.sort_descending = false;
-                        } else {
-                            app.sort_descending = true;
+                        match app.view_mode {
+                            ViewMode::Process => {
+                                if app.sort_descending {
+                                    app.sort_by = app.sort_by.next();
+                                    app.sort_descending = false;
+                                } else {
+                                    app.sort_descending = true;
+                                }
+                            }
+                            ViewMode::Connection => {
+                                if app.conn_sort_desc {
+                                    app.conn_sort_by = app.conn_sort_by.next();
+                                    app.conn_sort_desc = false;
+                                } else {
+                                    app.conn_sort_desc = true;
+                                }
+                            }
+                            ViewMode::Domain => {
+                                if app.domain_sort_desc {
+                                    app.domain_sort_by = app.domain_sort_by.next();
+                                    app.domain_sort_desc = false;
+                                } else {
+                                    app.domain_sort_desc = true;
+                                }
+                            }
                         }
                     }
                     KeyCode::Char('/') => {
@@ -227,25 +298,66 @@ fn run_loop(
     }
 }
 
-/// Move the process selection up (delta=-1) or down (delta=1).
-/// Uses visible_pids so selection respects the current filter.
-fn move_selection(state: &Arc<RwLock<AppState>>, delta: i32) {
-    let mut app = state.write().unwrap();
-    let now = Instant::now();
-    let pids = app.visible_pids(now);
-    if pids.is_empty() {
-        return;
+enum NavTarget {
+    Top,
+    Bottom,
+}
+
+/// Navigate by delta lines in the current view.
+fn navigate(state: &Arc<RwLock<AppState>>, table_state: &mut TableState, delta: i32) {
+    let view = state.read().unwrap().view_mode;
+    match view {
+        ViewMode::Process => {
+            let mut app = state.write().unwrap();
+            let now = Instant::now();
+            let pids = app.visible_pids(now);
+            if pids.is_empty() {
+                return;
+            }
+            let cur_idx = app
+                .selected_pid
+                .and_then(|p| pids.iter().position(|&x| x == p))
+                .unwrap_or(0);
+            let new_idx = if delta < 0 {
+                cur_idx.saturating_sub((-delta) as usize)
+            } else {
+                (cur_idx + delta as usize).min(pids.len() - 1)
+            };
+            app.selected_pid = pids.get(new_idx).copied();
+        }
+        _ => {
+            let cur = table_state.selected().unwrap_or(0);
+            let new = if delta < 0 {
+                cur.saturating_sub((-delta) as usize)
+            } else {
+                cur.saturating_add(delta as usize)
+            };
+            table_state.select(Some(new));
+        }
     }
-    let cur_idx = app
-        .selected_pid
-        .and_then(|p| pids.iter().position(|&x| x == p))
-        .unwrap_or(0);
-    let new_idx = if delta < 0 {
-        cur_idx.saturating_sub((-delta) as usize)
-    } else {
-        (cur_idx + delta as usize).min(pids.len() - 1)
-    };
-    app.selected_pid = pids.get(new_idx).copied();
+}
+
+/// Navigate to top or bottom of the current view.
+fn navigate_to(state: &Arc<RwLock<AppState>>, table_state: &mut TableState, target: NavTarget) {
+    let view = state.read().unwrap().view_mode;
+    match view {
+        ViewMode::Process => {
+            let mut app = state.write().unwrap();
+            let now = Instant::now();
+            let pids = app.visible_pids(now);
+            if pids.is_empty() {
+                return;
+            }
+            match target {
+                NavTarget::Top => app.selected_pid = pids.first().copied(),
+                NavTarget::Bottom => app.selected_pid = pids.last().copied(),
+            }
+        }
+        _ => match target {
+            NavTarget::Top => table_state.select(Some(0)),
+            NavTarget::Bottom => table_state.select(Some(usize::MAX / 2)),
+        },
+    }
 }
 
 fn draw_ui(f: &mut ratatui::Frame, app: &AppState, filter_input: &Option<String>, table_state: &mut TableState) {
@@ -325,8 +437,8 @@ fn draw_stats_bar(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
 fn draw_main_content(f: &mut ratatui::Frame, area: Rect, app: &AppState, table_state: &mut TableState) {
     match app.view_mode {
         ViewMode::Process => views::process::render(f, area, app, table_state),
-        ViewMode::Connection => views::connection::render(f, area, app),
-        ViewMode::Domain => views::domain::render(f, area, app),
+        ViewMode::Connection => views::connection::render(f, area, app, table_state),
+        ViewMode::Domain => views::domain::render(f, area, app, table_state),
     }
 }
 
@@ -357,17 +469,27 @@ fn draw_help_bar(
             Span::styled(" [q]", Style::default().fg(Color::Yellow)),
             Span::raw("Quit "),
             Span::styled("[j/k]", Style::default().fg(Color::Yellow)),
-            Span::raw("Navigate "),
-            Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
-            Span::raw("Expand "),
-            Span::styled("[v]", Style::default().fg(Color::Yellow)),
-            Span::raw("Detail "),
+            Span::raw("Scroll "),
+            Span::styled("[f/b]", Style::default().fg(Color::Yellow)),
+            Span::raw("Page "),
+            Span::styled("[d/u]", Style::default().fg(Color::Yellow)),
+            Span::raw("½Page "),
+            Span::styled("[g/G]", Style::default().fg(Color::Yellow)),
+            Span::raw("Top/End "),
             Span::styled("[/]", Style::default().fg(Color::Yellow)),
             Span::raw("Filter "),
             Span::styled("[s]", Style::default().fg(Color::Yellow)),
             Span::raw(format!("Sort:{}{} ",
-                app.sort_by.label(),
-                if app.sort_descending { "▼" } else { "▲" },
+                match app.view_mode {
+                    ViewMode::Process => app.sort_by.label(),
+                    ViewMode::Connection => app.conn_sort_by.label(),
+                    ViewMode::Domain => app.domain_sort_by.label(),
+                },
+                match app.view_mode {
+                    ViewMode::Process => if app.sort_descending { "▼" } else { "▲" },
+                    ViewMode::Connection => if app.conn_sort_desc { "▼" } else { "▲" },
+                    ViewMode::Domain => if app.domain_sort_desc { "▼" } else { "▲" },
+                },
             )),
             Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
             Span::raw(format!("View:{} ", app.view_mode.label())),

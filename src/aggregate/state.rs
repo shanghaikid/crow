@@ -231,6 +231,70 @@ impl SortBy {
     }
 }
 
+/// Sort criteria for the connection list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnSortBy {
+    Process,
+    Proto,
+    State,
+    Route,
+    TX,
+    RX,
+}
+
+impl ConnSortBy {
+    pub fn next(self) -> Self {
+        match self {
+            ConnSortBy::Process => ConnSortBy::Proto,
+            ConnSortBy::Proto => ConnSortBy::State,
+            ConnSortBy::State => ConnSortBy::Route,
+            ConnSortBy::Route => ConnSortBy::TX,
+            ConnSortBy::TX => ConnSortBy::RX,
+            ConnSortBy::RX => ConnSortBy::Process,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ConnSortBy::Process => "Process",
+            ConnSortBy::Proto => "Proto",
+            ConnSortBy::State => "State",
+            ConnSortBy::Route => "Route",
+            ConnSortBy::TX => "TX",
+            ConnSortBy::RX => "RX",
+        }
+    }
+}
+
+/// Sort criteria for the domain list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DomainSortBy {
+    Domain,
+    Conns,
+    TX,
+    RX,
+}
+
+impl DomainSortBy {
+    pub fn next(self) -> Self {
+        match self {
+            DomainSortBy::Domain => DomainSortBy::Conns,
+            DomainSortBy::Conns => DomainSortBy::TX,
+            DomainSortBy::TX => DomainSortBy::RX,
+            DomainSortBy::RX => DomainSortBy::Domain,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DomainSortBy::Domain => "Domain",
+            DomainSortBy::Conns => "Conns",
+            DomainSortBy::TX => "TX",
+            DomainSortBy::RX => "RX",
+        }
+    }
+}
+
 /// Which TUI view is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
@@ -270,6 +334,10 @@ pub struct AppState {
     // TUI state
     pub sort_by: SortBy,
     pub sort_descending: bool,
+    pub conn_sort_by: ConnSortBy,
+    pub conn_sort_desc: bool,
+    pub domain_sort_by: DomainSortBy,
+    pub domain_sort_desc: bool,
     pub view_mode: ViewMode,
     /// Selected process PID (tracks the process, not the row index)
     pub selected_pid: Option<u32>,
@@ -296,6 +364,10 @@ impl AppState {
             proxy_listen_addrs: HashSet::new(),
             sort_by: SortBy::Traffic,
             sort_descending: true,
+            conn_sort_by: ConnSortBy::TX,
+            conn_sort_desc: true,
+            domain_sort_by: DomainSortBy::TX,
+            domain_sort_desc: true,
             view_mode: ViewMode::Process,
             selected_pid: None,
             expanded_pids: std::collections::HashSet::new(),

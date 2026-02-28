@@ -4,9 +4,11 @@ use std::collections::{HashMap, HashSet};
 
 use ratatui::layout::Constraint;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Row, Table};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Cell, Row, Table, TableState};
 use ratatui::Frame;
 
+use crate::aggregate::state::DomainSortBy;
 use crate::aggregate::AppState;
 use crate::tui::widgets::format_bytes;
 
@@ -17,7 +19,7 @@ struct DomainEntry {
     conn_count: usize,
 }
 
-pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
+pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, table_state: &mut TableState) {
     // Aggregate connections by hostname
     let mut domains: HashMap<String, DomainEntry> = HashMap::new();
     let filter_lower = state.filter.as_ref().map(|f| f.to_lowercase());
@@ -49,12 +51,18 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
         }
     }
 
-    // Sort by total traffic descending
+    // Sort
+    let sort_by = state.domain_sort_by;
+    let desc = state.domain_sort_desc;
     let mut sorted: Vec<(String, DomainEntry)> = domains.into_iter().collect();
     sorted.sort_by(|a, b| {
-        let total_a = a.1.total_tx + a.1.total_rx;
-        let total_b = b.1.total_tx + b.1.total_rx;
-        total_b.cmp(&total_a)
+        let ord = match sort_by {
+            DomainSortBy::Domain => a.0.to_lowercase().cmp(&b.0.to_lowercase()),
+            DomainSortBy::Conns => a.1.conn_count.cmp(&b.1.conn_count),
+            DomainSortBy::TX => a.1.total_tx.cmp(&b.1.total_tx),
+            DomainSortBy::RX => a.1.total_rx.cmp(&b.1.total_rx),
+        };
+        if desc { ord.reverse() } else { ord }
     });
 
     let rows: Vec<Row> = sorted
@@ -72,11 +80,16 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
         })
         .collect();
 
-    let header = Row::new(vec!["Domain", "Processes", "Conns", "TX Total", "RX Total"]).style(
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    );
+    // Clamp selection to valid range
+    if let Some(selected) = table_state.selected() {
+        if !rows.is_empty() && selected >= rows.len() {
+            table_state.select(Some(rows.len() - 1));
+        }
+    } else if !rows.is_empty() {
+        table_state.select(Some(0));
+    }
+
+    let header = build_header(state.domain_sort_by, state.domain_sort_desc);
 
     let widths = [
         Constraint::Min(24),
@@ -88,7 +101,45 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
 
     let table = Table::new(rows, widths)
         .header(header)
+        .row_highlight_style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow))
+        .highlight_symbol("> ")
         .block(Block::default().borders(Borders::NONE));
 
-    f.render_widget(table, area);
+    f.render_stateful_widget(table, area, table_state);
+}
+
+fn build_header(sort_by: DomainSortBy, descending: bool) -> Row<'static> {
+    let normal = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let active = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    let columns: &[(&str, Option<DomainSortBy>)] = &[
+        ("Domain", Some(DomainSortBy::Domain)),
+        ("Processes", None),
+        ("Conns", Some(DomainSortBy::Conns)),
+        ("TX Total", Some(DomainSortBy::TX)),
+        ("RX Total", Some(DomainSortBy::RX)),
+    ];
+
+    let arrow = if descending { " ▼" } else { " ▲" };
+
+    let cells: Vec<Cell> = columns
+        .iter()
+        .map(|(label, key)| {
+            let is_active = key.map(|k| k == sort_by).unwrap_or(false);
+            if is_active {
+                Cell::from(Line::from(vec![
+                    Span::styled(label.to_string(), active),
+                    Span::styled(arrow, active),
+                ]))
+            } else {
+                Cell::from(Span::styled(label.to_string(), normal))
+            }
+        })
+        .collect();
+
+    Row::new(cells)
 }

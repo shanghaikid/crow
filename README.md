@@ -49,19 +49,29 @@ sudo cargo run --release
 
 ### Keybindings
 
+All list views (Process, Connection, Domain) share the same pager-style navigation:
+
 | Key | Action |
 |-----|--------|
-| **j/k** or **Up/Down** | Navigate process list |
-| **Enter** | Expand/collapse process (shows connections) |
-| **v** | Open packet log detail view for selected process |
-| **/** | Enter filter mode (type to filter, live preview) |
-| **Enter** (filter mode) | Confirm filter, select and expand first match |
-| **Esc** (filter mode) | Cancel filter |
-| **Esc** (normal mode) | Collapse last expanded process; if none, clear filter |
+| **j/k** or **↑/↓** | Scroll one line |
+| **Space/f** or **PageDown** | Page down |
+| **b** or **PageUp** | Page up |
+| **d/u** | Half page down/up |
+| **g** or **Home** | Jump to top |
+| **G** or **End** | Jump to bottom |
 | **s** | Cycle sort: ascending ▲ → descending ▼ → next field |
+| **/** | Enter filter mode (type to filter, live preview) |
 | **Tab** | Switch view (Process / Connection / Domain) |
-| **q** | Quit |
-| **Ctrl+C** | Quit |
+| **Enter** | Expand/collapse process (Process view) |
+| **v** | Open packet log detail view for selected process |
+| **Esc** | Collapse last expanded / cancel filter / clear filter |
+| **q** or **Ctrl+C** | Quit |
+
+#### Per-view sort fields (`s` to cycle)
+
+- **Process view** — Traffic → Conns → PID → Name
+- **Connection view** — Process → Proto → State → Route → TX → RX
+- **Domain view** — Domain → Conns → TX → RX
 
 ### Packet Log Detail View
 
@@ -71,17 +81,7 @@ Select a process and press **v** to open a full-screen packet log showing all ca
 - `GET /api/data` — HTTP request method and path
 - `DNS example.com -> 3 addr` — DNS resolution results
 
-Each entry shows a millisecond-precision local timestamp (e.g. `19:04:43.217`), direction (^ upload / v download), and packet size.
-
-| Key | Action |
-|-----|--------|
-| **j/k** or **Up/Down** | Scroll one line |
-| **Space/f/PageDown** | Page down |
-| **b/PageUp** | Page up |
-| **d/u** | Half page down/up |
-| **g/Home** | Jump to top |
-| **G/End** | Jump to bottom |
-| **Esc/q** | Back to process list |
+Each entry shows a millisecond-precision local timestamp (e.g. `19:04:43.217`), direction (^ upload / v download), and packet size. Supports the same pager-style navigation as the main views.
 
 ### CLI Options
 
@@ -120,9 +120,10 @@ src/
     ├── app.rs           # TUI main loop, keybindings
     ├── widgets.rs       # Formatting helpers
     └── views/
-        ├── process.rs   # Process view (grouped, expandable, packet log)
+        ├── process.rs   # Process view (grouped, expandable)
         ├── connection.rs # Flat connection list
-        └── domain.rs    # Domain-grouped view
+        ├── domain.rs    # Domain-grouped view
+        └── detail.rs    # Packet log detail view
 ```
 
 **Three threads:**

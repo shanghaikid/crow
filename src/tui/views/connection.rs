@@ -4,19 +4,34 @@ use std::time::Instant;
 
 use ratatui::layout::Constraint;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Row, Table};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Cell, Row, Table, TableState};
 use ratatui::Frame;
 
-use crate::aggregate::state::ConnectionRoute;
+use crate::aggregate::state::{ConnSortBy, ConnectionRoute, TcpState};
 use crate::aggregate::AppState;
 use crate::tui::widgets::format_bytes;
 
-pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
+struct ConnRow {
+    proc_name: String,
+    alive: bool,
+    is_proxy: bool,
+    proto: &'static str,
+    local: String,
+    remote: String,
+    state: TcpState,
+    route: ConnectionRoute,
+    tx: u64,
+    rx: u64,
+}
+
+pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, table_state: &mut TableState) {
     let now = Instant::now();
     let pids = state.sorted_pids(now);
     let filter_lower = state.filter.as_ref().map(|f| f.to_lowercase());
 
-    let mut rows: Vec<Row> = Vec::new();
+    // Collect data for sorting
+    let mut conn_rows: Vec<ConnRow> = Vec::new();
 
     for &pid in &pids {
         let proc_info = match state.processes.get(&pid) {
@@ -25,7 +40,6 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
         };
 
         for conn in &proc_info.connections {
-            // Apply filter
             if let Some(ref fl) = filter_lower {
                 if !proc_info.matches_filter(fl) {
                     continue;
@@ -34,38 +48,115 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
 
             let remote = conn.remote_display();
 
-            let style = if !proc_info.alive {
-                Style::default().fg(Color::DarkGray)
-            } else if conn.route == ConnectionRoute::Proxied {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default()
-            };
-
-            rows.push(
-                Row::new(vec![
-                    proc_info.name.clone(),
-                    conn.protocol_str().to_string(),
-                    conn.local_addr.to_string(),
-                    format!("{}:{}", remote, conn.remote_addr.port()),
-                    conn.state.to_string(),
-                    conn.route.to_string(),
-                    format_bytes(conn.bytes_tx),
-                    format_bytes(conn.bytes_rx),
-                ])
-                .style(style),
-            );
+            conn_rows.push(ConnRow {
+                proc_name: proc_info.name.clone(),
+                alive: proc_info.alive,
+                is_proxy: proc_info.is_proxy,
+                proto: conn.protocol_str(),
+                local: conn.local_addr.to_string(),
+                remote: format!("{}:{}", remote, conn.remote_addr.port()),
+                state: conn.state,
+                route: conn.route,
+                tx: conn.bytes_tx,
+                rx: conn.bytes_rx,
+            });
         }
     }
 
-    let header = Row::new(vec![
-        "Process", "Proto", "Local", "Remote", "State", "Route", "TX", "RX",
-    ])
-    .style(
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    );
+    // Sort
+    let sort_by = state.conn_sort_by;
+    let desc = state.conn_sort_desc;
+    conn_rows.sort_by(|a, b| {
+        // Dead processes always at end
+        let alive_ord = b.alive.cmp(&a.alive);
+        if alive_ord != std::cmp::Ordering::Equal {
+            return alive_ord;
+        }
+
+        let ord = match sort_by {
+            ConnSortBy::Process => a.proc_name.to_lowercase().cmp(&b.proc_name.to_lowercase()),
+            ConnSortBy::Proto => a.proto.cmp(b.proto),
+            ConnSortBy::State => a.state.to_string().cmp(&b.state.to_string()),
+            ConnSortBy::Route => route_rank(a.route).cmp(&route_rank(b.route)),
+            ConnSortBy::TX => a.tx.cmp(&b.tx),
+            ConnSortBy::RX => a.rx.cmp(&b.rx),
+        };
+        if desc { ord.reverse() } else { ord }
+    });
+
+    // Build rows
+    let rows: Vec<Row> = conn_rows.iter().map(|cr| {
+        let name_style = if !cr.alive {
+            Style::default().fg(Color::DarkGray)
+        } else if cr.is_proxy {
+            Style::default().fg(Color::Magenta)
+        } else {
+            Style::default()
+        };
+
+        let proto_style = if !cr.alive {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            match cr.proto {
+                "TCP" => Style::default().fg(Color::Cyan),
+                "UDP" => Style::default().fg(Color::Yellow),
+                _ => Style::default(),
+            }
+        };
+
+        let state_style = if !cr.alive {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            match cr.state {
+                TcpState::Established => Style::default().fg(Color::Green),
+                TcpState::Listen => Style::default().fg(Color::Cyan),
+                TcpState::CloseWait | TcpState::LastAck | TcpState::Closing => {
+                    Style::default().fg(Color::Yellow)
+                }
+                TcpState::TimeWait | TcpState::Closed => Style::default().fg(Color::DarkGray),
+                TcpState::SynSent | TcpState::SynReceived => Style::default().fg(Color::Blue),
+                _ => Style::default(),
+            }
+        };
+
+        let route_style = if !cr.alive {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            match cr.route {
+                ConnectionRoute::Proxied => Style::default().fg(Color::Green),
+                ConnectionRoute::Direct => Style::default().fg(Color::Blue),
+                ConnectionRoute::Unknown => Style::default().fg(Color::DarkGray),
+            }
+        };
+
+        let base_style = if !cr.alive {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default()
+        };
+
+        Row::new(vec![
+            Cell::from(Span::styled(cr.proc_name.clone(), name_style)),
+            Cell::from(Span::styled(cr.proto.to_string(), proto_style)),
+            Cell::from(Span::styled(cr.local.clone(), base_style)),
+            Cell::from(Span::styled(cr.remote.clone(), base_style)),
+            Cell::from(Span::styled(cr.state.to_string(), state_style)),
+            Cell::from(Span::styled(cr.route.to_string(), route_style)),
+            Cell::from(Span::styled(format_bytes(cr.tx), base_style)),
+            Cell::from(Span::styled(format_bytes(cr.rx), base_style)),
+        ])
+    }).collect();
+
+    // Clamp selection to valid range
+    if let Some(selected) = table_state.selected() {
+        if !rows.is_empty() && selected >= rows.len() {
+            table_state.select(Some(rows.len() - 1));
+        }
+    } else if !rows.is_empty() {
+        table_state.select(Some(0));
+    }
+
+    let header = build_header(state.conn_sort_by, state.conn_sort_desc);
 
     let widths = [
         Constraint::Length(16),
@@ -80,7 +171,56 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
 
     let table = Table::new(rows, widths)
         .header(header)
+        .row_highlight_style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow))
+        .highlight_symbol("> ")
         .block(Block::default().borders(Borders::NONE));
 
-    f.render_widget(table, area);
+    f.render_stateful_widget(table, area, table_state);
+}
+
+fn route_rank(r: ConnectionRoute) -> u8 {
+    match r {
+        ConnectionRoute::Proxied => 0,
+        ConnectionRoute::Direct => 1,
+        ConnectionRoute::Unknown => 2,
+    }
+}
+
+fn build_header(sort_by: ConnSortBy, descending: bool) -> Row<'static> {
+    let normal = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let active = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    let columns: &[(&str, Option<ConnSortBy>)] = &[
+        ("Process", Some(ConnSortBy::Process)),
+        ("Proto", Some(ConnSortBy::Proto)),
+        ("Local", None),
+        ("Remote", None),
+        ("State", Some(ConnSortBy::State)),
+        ("Route", Some(ConnSortBy::Route)),
+        ("TX", Some(ConnSortBy::TX)),
+        ("RX", Some(ConnSortBy::RX)),
+    ];
+
+    let arrow = if descending { " ▼" } else { " ▲" };
+
+    let cells: Vec<Cell> = columns
+        .iter()
+        .map(|(label, key)| {
+            let is_active = key.map(|k| k == sort_by).unwrap_or(false);
+            if is_active {
+                Cell::from(Line::from(vec![
+                    Span::styled(label.to_string(), active),
+                    Span::styled(arrow, active),
+                ]))
+            } else {
+                Cell::from(Span::styled(label.to_string(), normal))
+            }
+        })
+        .collect();
+
+    Row::new(cells)
 }
