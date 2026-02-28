@@ -12,7 +12,7 @@ Real-time per-process network monitor for macOS. Built with Rust.
 - **Proxy detection** — detects proxy software (Clash, sing-box, V2Ray, Karing, etc.) and shows which connections are proxied vs direct
 - **DNS resolution** — captures DNS responses to show hostnames instead of raw IPs
 - **Expandable connections** — drill into each process to see individual TCP/UDP connections with state and route info
-- **Live filtering** — type to filter processes instantly, Esc to clear
+- **Live filtering** — press `/` to filter, Enter to confirm and expand first match, Esc to cancel
 - **Multiple views** — Process, Connection, and Domain views (Tab to switch)
 
 ## Installation
@@ -49,13 +49,15 @@ sudo cargo run --release
 
 | Key | Action |
 |-----|--------|
-| **Type** | Filter processes by name |
-| **Esc** | Clear filter |
-| **Up/Down** | Navigate process list |
+| **j/k** or **Up/Down** | Navigate process list |
 | **Enter** | Expand/collapse connections |
+| **/** | Enter filter mode (type to filter, live preview) |
+| **Enter** (filter mode) | Confirm filter, select and expand first match |
+| **Esc** (filter mode) | Cancel filter |
+| **Esc** (normal mode) | Clear active filter |
+| **s** | Cycle sort mode (Traffic/Connections/PID/Name) |
 | **Tab** | Switch view (Process/Connection/Domain) |
-| **F1** | Cycle sort mode (Traffic/Connections/PID/Name) |
-| **q** | Quit (when filter is empty) |
+| **q** | Quit |
 | **Ctrl+C** | Quit |
 
 ### CLI Options

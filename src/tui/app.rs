@@ -45,31 +45,90 @@ fn run_loop(
     state: Arc<RwLock<AppState>>,
     tick_rate: Duration,
 ) -> anyhow::Result<()> {
-    let mut filter_text = String::new();
+    let mut filter_input: Option<String> = None; // Some = filter editing mode
     let mut table_state = TableState::default();
 
     loop {
         // Draw
         terminal.draw(|f| {
             let app = state.read().unwrap();
-            draw_ui(f, &app, &filter_text, &mut table_state);
+            draw_ui(f, &app, &filter_input, &mut table_state);
         })?;
 
         // Handle input
         if event::poll(tick_rate)? {
             if let Event::Key(key) = event::read()? {
+                // Global keys (always work)
                 match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         return Ok(())
                     }
-                    KeyCode::Char('q') if filter_text.is_empty() => return Ok(()),
-                    KeyCode::Esc => {
-                        filter_text.clear();
+                    KeyCode::Up => { move_selection(&state, -1); continue; }
+                    KeyCode::Down => { move_selection(&state, 1); continue; }
+                    KeyCode::Tab => {
                         let mut app = state.write().unwrap();
-                        app.filter = None;
+                        app.view_mode = app.view_mode.next();
+                        continue;
                     }
-                    KeyCode::Up => move_selection(&state, -1),
-                    KeyCode::Down => move_selection(&state, 1),
+                    _ => {}
+                }
+
+                // Filter editing mode
+                if let Some(ref mut input) = filter_input {
+                    match key.code {
+                        KeyCode::Esc => {
+                            // Cancel: clear filter, back to normal
+                            filter_input = None;
+                            let mut app = state.write().unwrap();
+                            app.filter = None;
+                        }
+                        KeyCode::Enter => {
+                            // Confirm: keep filter, select first and expand, back to normal
+                            let text = input.clone();
+                            filter_input = None;
+                            let mut app = state.write().unwrap();
+                            if text.is_empty() {
+                                app.filter = None;
+                            }
+                            // Select and expand first visible process
+                            let now = Instant::now();
+                            let visible = app.visible_pids(now);
+                            if let Some(&first_pid) = visible.first() {
+                                app.selected_pid = Some(first_pid);
+                                app.expanded_pids.insert(first_pid);
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            input.pop();
+                            let mut app = state.write().unwrap();
+                            app.filter = if input.is_empty() {
+                                None
+                            } else {
+                                Some(input.clone())
+                            };
+                        }
+                        KeyCode::Char(c) => {
+                            input.push(c);
+                            let mut app = state.write().unwrap();
+                            app.filter = Some(input.clone());
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // Normal mode
+                match key.code {
+                    KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('j') => move_selection(&state, 1),
+                    KeyCode::Char('k') => move_selection(&state, -1),
+                    KeyCode::Char('s') => {
+                        let mut app = state.write().unwrap();
+                        app.sort_by = app.sort_by.next();
+                    }
+                    KeyCode::Char('/') => {
+                        filter_input = Some(String::new());
+                    }
                     KeyCode::Enter => {
                         let mut app = state.write().unwrap();
                         if let Some(pid) = app.selected_pid {
@@ -78,27 +137,10 @@ fn run_loop(
                             }
                         }
                     }
-                    KeyCode::Tab => {
+                    KeyCode::Esc => {
+                        // Clear active filter
                         let mut app = state.write().unwrap();
-                        app.view_mode = app.view_mode.next();
-                    }
-                    KeyCode::F(1) => {
-                        let mut app = state.write().unwrap();
-                        app.sort_by = app.sort_by.next();
-                    }
-                    KeyCode::Backspace => {
-                        filter_text.pop();
-                        let mut app = state.write().unwrap();
-                        app.filter = if filter_text.is_empty() {
-                            None
-                        } else {
-                            Some(filter_text.clone())
-                        };
-                    }
-                    KeyCode::Char(c) => {
-                        filter_text.push(c);
-                        let mut app = state.write().unwrap();
-                        app.filter = Some(filter_text.clone());
+                        app.filter = None;
                     }
                     _ => {}
                 }
@@ -128,7 +170,7 @@ fn move_selection(state: &Arc<RwLock<AppState>>, delta: i32) {
     app.selected_pid = pids.get(new_idx).copied();
 }
 
-fn draw_ui(f: &mut ratatui::Frame, app: &AppState, filter_text: &str, table_state: &mut TableState) {
+fn draw_ui(f: &mut ratatui::Frame, app: &AppState, filter_input: &Option<String>, table_state: &mut TableState) {
     let size = f.area();
 
     let chunks = Layout::default()
@@ -142,7 +184,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &AppState, filter_text: &str, table_stat
 
     draw_stats_bar(f, chunks[0], app);
     draw_main_content(f, chunks[1], app, table_state);
-    draw_help_bar(f, chunks[2], app, filter_text);
+    draw_help_bar(f, chunks[2], app, filter_input);
 }
 
 fn draw_stats_bar(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
@@ -208,31 +250,50 @@ fn draw_help_bar(
     f: &mut ratatui::Frame,
     area: Rect,
     app: &AppState,
-    filter_text: &str,
+    filter_input: &Option<String>,
 ) {
-    let mut spans = vec![
-        Span::styled(" [q]", Style::default().fg(Color::Yellow)),
-        Span::raw("Quit "),
-        Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
-        Span::raw("Expand "),
-        Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
-        Span::raw(format!("View:{} ", app.view_mode.label())),
-        Span::styled("[F1]", Style::default().fg(Color::Yellow)),
-        Span::raw(format!("Sort:{} ", app.sort_by.label())),
-        Span::styled("[Esc]", Style::default().fg(Color::Yellow)),
-        Span::raw("Clear "),
-    ];
-
-    if !filter_text.is_empty() {
-        spans.push(Span::styled(
-            format!(" Filter: {}", filter_text),
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            "_",
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::SLOW_BLINK),
-        ));
-    }
+    let spans = if let Some(ref input) = filter_input {
+        // Filter editing mode
+        vec![
+            Span::styled(" /", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                input.as_str(),
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("_", Style::default().fg(Color::Magenta).add_modifier(Modifier::SLOW_BLINK)),
+            Span::raw("  "),
+            Span::styled("[Enter]", Style::default().fg(Color::DarkGray)),
+            Span::raw(" Confirm  "),
+            Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
+            Span::raw(" Cancel"),
+        ]
+    } else {
+        // Normal mode
+        let mut s = vec![
+            Span::styled(" [q]", Style::default().fg(Color::Yellow)),
+            Span::raw("Quit "),
+            Span::styled("[j/k]", Style::default().fg(Color::Yellow)),
+            Span::raw("Navigate "),
+            Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
+            Span::raw("Expand "),
+            Span::styled("[/]", Style::default().fg(Color::Yellow)),
+            Span::raw("Filter "),
+            Span::styled("[s]", Style::default().fg(Color::Yellow)),
+            Span::raw(format!("Sort:{} ", app.sort_by.label())),
+            Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
+            Span::raw(format!("View:{} ", app.view_mode.label())),
+        ];
+        if let Some(ref filter) = app.filter {
+            s.push(Span::styled(
+                format!("  /{}", filter),
+                Style::default().fg(Color::Magenta),
+            ));
+            s.push(Span::raw(" "));
+            s.push(Span::styled("[Esc]", Style::default().fg(Color::Yellow)));
+            s.push(Span::raw("Clear"));
+        }
+        s
+    };
 
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line);

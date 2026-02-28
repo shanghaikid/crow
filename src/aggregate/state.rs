@@ -299,13 +299,14 @@ impl AppState {
 
     /// Return PIDs sorted according to current sort criteria.
     /// Only includes processes that have actual traffic data.
+    /// Dead processes are always sorted to the end.
     pub fn sorted_pids(&self, now: Instant) -> Vec<u32> {
         let active = self
             .processes
             .iter()
             .filter(|(_, p)| p.has_traffic());
 
-        match self.sort_by {
+        let mut pids: Vec<u32> = match self.sort_by {
             SortBy::Traffic => {
                 let mut keyed: Vec<(u32, f64)> = active
                     .map(|(&pid, p)| {
@@ -328,9 +329,9 @@ impl AppState {
                 keyed.into_iter().map(|(pid, _)| pid).collect()
             }
             SortBy::Pid => {
-                let mut pids: Vec<u32> = active.map(|(&pid, _)| pid).collect();
-                pids.sort();
-                pids
+                let mut p: Vec<u32> = active.map(|(&pid, _)| pid).collect();
+                p.sort();
+                p
             }
             SortBy::Name => {
                 let mut keyed: Vec<(u32, &str)> = active
@@ -339,7 +340,13 @@ impl AppState {
                 keyed.sort_by(|a, b| a.1.cmp(b.1).then(a.0.cmp(&b.0)));
                 keyed.into_iter().map(|(pid, _)| pid).collect()
             }
-        }
+        };
+
+        // Dead processes always at the end
+        let procs = &self.processes;
+        pids.sort_by_key(|pid| !procs.get(pid).map(|p| p.alive).unwrap_or(false));
+
+        pids
     }
 }
 
