@@ -273,6 +273,8 @@ pub struct AppState {
     /// Selected process PID (tracks the process, not the row index)
     pub selected_pid: Option<u32>,
     pub expanded_pids: std::collections::HashSet<u32>,
+    /// Tracks expansion order for Esc to undo last expand.
+    pub expansion_order: Vec<u32>,
     pub filter: Option<String>,
     pub started_at: Instant,
     pub local_ip: String,
@@ -293,6 +295,7 @@ impl AppState {
             view_mode: ViewMode::Process,
             selected_pid: None,
             expanded_pids: std::collections::HashSet::new(),
+            expansion_order: Vec::new(),
             filter: None,
             local_ip: get_local_ip(),
             started_at: Instant::now(),

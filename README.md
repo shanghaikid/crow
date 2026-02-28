@@ -56,7 +56,7 @@ sudo cargo run --release
 | **/** | Enter filter mode (type to filter, live preview) |
 | **Enter** (filter mode) | Confirm filter, select and expand first match |
 | **Esc** (filter mode) | Cancel filter |
-| **Esc** (normal mode) | Clear active filter |
+| **Esc** (normal mode) | Collapse last expanded process; if none, clear filter |
 | **s** | Cycle sort: ascending ▲ → descending ▼ → next field |
 | **Tab** | Switch view (Process / Connection / Domain) |
 | **q** | Quit |

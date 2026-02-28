@@ -95,7 +95,9 @@ fn run_loop(
                             let visible = app.visible_pids(now);
                             if let Some(&first_pid) = visible.first() {
                                 app.selected_pid = Some(first_pid);
-                                app.expanded_pids.insert(first_pid);
+                                if app.expanded_pids.insert(first_pid) {
+                                    app.expansion_order.push(first_pid);
+                                }
                             }
                         }
                         KeyCode::Backspace => {
@@ -139,15 +141,21 @@ fn run_loop(
                     KeyCode::Enter => {
                         let mut app = state.write().unwrap();
                         if let Some(pid) = app.selected_pid {
-                            if !app.expanded_pids.remove(&pid) {
+                            if app.expanded_pids.remove(&pid) {
+                                app.expansion_order.retain(|&p| p != pid);
+                            } else {
                                 app.expanded_pids.insert(pid);
+                                app.expansion_order.push(pid);
                             }
                         }
                     }
                     KeyCode::Esc => {
-                        // Clear active filter
                         let mut app = state.write().unwrap();
-                        app.filter = None;
+                        if let Some(pid) = app.expansion_order.pop() {
+                            app.expanded_pids.remove(&pid);
+                        } else {
+                            app.filter = None;
+                        }
                     }
                     _ => {}
                 }
