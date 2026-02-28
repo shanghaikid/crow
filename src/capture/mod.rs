@@ -19,21 +19,29 @@ pub enum CaptureMode {
     RawIp,
 }
 
-/// Open a capture on pktap,all. Tries to enable PKTAP headers for PID
+/// Open a capture on pktap,all. Requests PKTAP headers for PID
 /// attribution, falls back to raw IP if not supported.
 pub fn open_pktap_capture() -> Result<(Capture<pcap::Active>, CaptureMode)> {
-    let mut cap = Capture::from_device("pktap,all")
+    let inactive = Capture::from_device("pktap,all")
         .context("Failed to open pktap device. Run with: sudo crow")?
         .immediate_mode(true)
-        .snaplen(65535)
+        .snaplen(65535);
+
+    // Request PKTAP headers before activation (macOS-specific).
+    // This calls pcap_set_want_pktap() which must happen before pcap_activate().
+    #[cfg(target_os = "macos")]
+    let inactive = inactive.want_pktap(true);
+
+    let mut cap = inactive
         .open()
         .context("Failed to activate pktap capture. Ensure BPF access.")?;
 
-    // Try to enable PKTAP datalink for PID attribution
-    let mode = if cap.set_datalink(pcap::Linktype(pktap::DLT_PKTAP as i32)).is_ok() {
+    // Check if PKTAP datalink is now available
+    let mode = if cap.get_datalink().0 == pktap::DLT_PKTAP as i32 {
+        CaptureMode::Pktap
+    } else if cap.set_datalink(pcap::Linktype(pktap::DLT_PKTAP as i32)).is_ok() {
         CaptureMode::Pktap
     } else {
-        // Fall back to raw IP — will use socket-matching for PID attribution
         CaptureMode::RawIp
     };
 

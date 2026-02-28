@@ -7,6 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Row, Table};
 use ratatui::Frame;
 
+use crate::aggregate::state::ConnectionRoute;
 use crate::aggregate::AppState;
 use crate::tui::widgets::format_bytes;
 
@@ -35,6 +36,8 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
 
             let style = if !proc_info.alive {
                 Style::default().fg(Color::DarkGray)
+            } else if conn.route == ConnectionRoute::Proxied {
+                Style::default().fg(Color::Green)
             } else {
                 Style::default()
             };
@@ -46,6 +49,7 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
                     conn.local_addr.to_string(),
                     format!("{}:{}", remote, conn.remote_addr.port()),
                     conn.state.to_string(),
+                    conn.route.to_string(),
                     format_bytes(conn.bytes_tx),
                     format_bytes(conn.bytes_rx),
                 ])
@@ -55,7 +59,7 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     }
 
     let header = Row::new(vec![
-        "Process", "Proto", "Local", "Remote", "State", "TX", "RX",
+        "Process", "Proto", "Local", "Remote", "State", "Route", "TX", "RX",
     ])
     .style(
         Style::default()
@@ -69,6 +73,7 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
         Constraint::Length(22),
         Constraint::Min(24),
         Constraint::Length(13),
+        Constraint::Length(7),
         Constraint::Length(10),
         Constraint::Length(10),
     ];

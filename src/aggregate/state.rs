@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::collections::{HashMap, HashSet};
+use std::net::{SocketAddr, UdpSocket};
 use std::time::Instant;
 
 use super::counter::RollingCounter;
@@ -57,6 +57,24 @@ impl std::fmt::Display for TcpState {
     }
 }
 
+/// Route classification for a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionRoute {
+    Direct,
+    Proxied,
+    Unknown,
+}
+
+impl std::fmt::Display for ConnectionRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectionRoute::Direct => write!(f, "DIRECT"),
+            ConnectionRoute::Proxied => write!(f, "PROXY"),
+            ConnectionRoute::Unknown => write!(f, ""),
+        }
+    }
+}
+
 /// DNS information extracted from a captured DNS response.
 #[derive(Debug, Clone)]
 pub struct DnsInfo {
@@ -88,7 +106,7 @@ pub struct Connection {
     pub state: TcpState,
     pub bytes_tx: u64,
     pub bytes_rx: u64,
-    pub latency: Option<std::time::Duration>,
+    pub route: ConnectionRoute,
 }
 
 impl Connection {
@@ -115,10 +133,12 @@ pub struct ProcessInfo {
     pub name: String,
     pub bytes_tx: RollingCounter,
     pub bytes_rx: RollingCounter,
+    pub total_tx: u64,
+    pub total_rx: u64,
     pub connections: Vec<Connection>,
-    pub first_seen: Instant,
     pub last_seen: Instant,
     pub alive: bool,
+    pub is_proxy: bool,
 }
 
 impl ProcessInfo {
@@ -127,11 +147,18 @@ impl ProcessInfo {
             name,
             bytes_tx: RollingCounter::new(),
             bytes_rx: RollingCounter::new(),
+            total_tx: 0,
+            total_rx: 0,
             connections: Vec::new(),
-            first_seen: now,
             last_seen: now,
             alive: true,
+            is_proxy: false,
         }
+    }
+
+    /// Whether this process has any recorded traffic.
+    pub fn has_traffic(&self) -> bool {
+        self.connections.iter().any(|c| c.bytes_tx > 0 || c.bytes_rx > 0)
     }
 
     /// Check if this process matches a filter string (case-insensitive).
@@ -212,6 +239,10 @@ pub struct AppState {
     pub dns_cache: DnsCache,
     pub total_tx: RollingCounter,
     pub total_rx: RollingCounter,
+    pub grand_total_tx: u64,
+    pub grand_total_rx: u64,
+    /// Listen addresses of detected proxy processes.
+    pub proxy_listen_addrs: HashSet<SocketAddr>,
     // TUI state
     pub sort_by: SortBy,
     pub view_mode: ViewMode,
@@ -219,6 +250,8 @@ pub struct AppState {
     pub selected_pid: Option<u32>,
     pub expanded_pids: std::collections::HashSet<u32>,
     pub filter: Option<String>,
+    pub started_at: Instant,
+    pub local_ip: String,
 }
 
 impl AppState {
@@ -228,11 +261,34 @@ impl AppState {
             dns_cache: DnsCache::new(),
             total_tx: RollingCounter::new(),
             total_rx: RollingCounter::new(),
+            grand_total_tx: 0,
+            grand_total_rx: 0,
+            proxy_listen_addrs: HashSet::new(),
             sort_by: SortBy::Traffic,
             view_mode: ViewMode::Process,
             selected_pid: None,
             expanded_pids: std::collections::HashSet::new(),
             filter: None,
+            local_ip: get_local_ip(),
+            started_at: Instant::now(),
+        }
+    }
+
+    /// Return visible PIDs: sorted, with traffic, and matching the current filter.
+    pub fn visible_pids(&self, now: Instant) -> Vec<u32> {
+        let pids = self.sorted_pids(now);
+        let filter_lower = self.filter.as_ref().map(|f| f.to_lowercase());
+        match filter_lower {
+            Some(fl) => pids
+                .into_iter()
+                .filter(|pid| {
+                    self.processes
+                        .get(pid)
+                        .map(|p| p.matches_filter(&fl))
+                        .unwrap_or(false)
+                })
+                .collect(),
+            None => pids,
         }
     }
 
@@ -242,13 +298,16 @@ impl AppState {
     }
 
     /// Return PIDs sorted according to current sort criteria.
-    /// Pre-computes sort keys (Schwartzian transform) to avoid redundant work.
+    /// Only includes processes that have actual traffic data.
     pub fn sorted_pids(&self, now: Instant) -> Vec<u32> {
+        let active = self
+            .processes
+            .iter()
+            .filter(|(_, p)| p.has_traffic());
+
         match self.sort_by {
             SortBy::Traffic => {
-                let mut keyed: Vec<(u32, f64)> = self
-                    .processes
-                    .iter()
+                let mut keyed: Vec<(u32, f64)> = active
                     .map(|(&pid, p)| {
                         let rate = p.bytes_tx.rate_1s(now) + p.bytes_rx.rate_1s(now);
                         (pid, rate)
@@ -262,23 +321,19 @@ impl AppState {
                 keyed.into_iter().map(|(pid, _)| pid).collect()
             }
             SortBy::Connections => {
-                let mut keyed: Vec<(u32, usize)> = self
-                    .processes
-                    .iter()
+                let mut keyed: Vec<(u32, usize)> = active
                     .map(|(&pid, p)| (pid, p.connections.len()))
                     .collect();
                 keyed.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
                 keyed.into_iter().map(|(pid, _)| pid).collect()
             }
             SortBy::Pid => {
-                let mut pids: Vec<u32> = self.processes.keys().copied().collect();
+                let mut pids: Vec<u32> = active.map(|(&pid, _)| pid).collect();
                 pids.sort();
                 pids
             }
             SortBy::Name => {
-                let mut keyed: Vec<(u32, &str)> = self
-                    .processes
-                    .iter()
+                let mut keyed: Vec<(u32, &str)> = active
                     .map(|(&pid, p)| (pid, p.name.as_str()))
                     .collect();
                 keyed.sort_by(|a, b| a.1.cmp(b.1).then(a.0.cmp(&b.0)));
@@ -292,4 +347,15 @@ impl Default for AppState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Detect the local IP by connecting a UDP socket to a public address.
+fn get_local_ip() -> String {
+    UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("8.8.8.8:80")?;
+            s.local_addr()
+        })
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
 }

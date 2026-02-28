@@ -96,24 +96,28 @@ pub fn parse_raw_ip(data: &[u8], now: Instant) -> Option<PacketEvent> {
 /// Extract IP header fields from an IPv4 packet.
 fn parse_ip4_header(data: &[u8]) -> Option<(IpAddr, IpAddr, pnet_packet::ip::IpNextHeaderProtocol, &[u8])> {
     let ipv4 = Ipv4Packet::new(data)?;
+    let hdr_len = ipv4.get_header_length() as usize * 4;
+    if hdr_len > data.len() {
+        return None;
+    }
     Some((
         IpAddr::V4(ipv4.get_source()),
         IpAddr::V4(ipv4.get_destination()),
         ipv4.get_next_level_protocol(),
-        // Return a sub-slice from the original data for the payload
-        // Ipv4Packet::payload() returns the correct slice
-        &data[ipv4.get_header_length() as usize * 4..],
+        &data[hdr_len..],
     ))
 }
 
 /// Extract IP header fields from an IPv6 packet.
 fn parse_ip6_header(data: &[u8]) -> Option<(IpAddr, IpAddr, pnet_packet::ip::IpNextHeaderProtocol, &[u8])> {
     let ipv6 = Ipv6Packet::new(data)?;
+    if data.len() < 40 {
+        return None;
+    }
     Some((
         IpAddr::V6(ipv6.get_source()),
         IpAddr::V6(ipv6.get_destination()),
         ipv6.get_next_header(),
-        // IPv6 fixed header is 40 bytes
         &data[40..],
     ))
 }

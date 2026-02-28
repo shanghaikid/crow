@@ -59,7 +59,9 @@ impl SocketSnapshot {
             if pid == 0 {
                 continue;
             }
-            let name = proc_pid::name(pid as i32).unwrap_or_default();
+            let name = full_process_name(pid as i32)
+                .or_else(|| proc_pid::name(pid as i32).ok())
+                .unwrap_or_default();
             let conns = get_process_connections(pid as i32, &name);
             all_conns.extend(conns);
         }
@@ -69,12 +71,19 @@ impl SocketSnapshot {
         let mut by_pid: HashMap<u32, Vec<SocketConnection>> = HashMap::new();
 
         for conn in all_conns {
-            by_local_port
-                .entry(conn.local_addr.port())
-                .or_default()
-                .push(conn.clone());
+            // Always index by PID (including LISTEN sockets for proxy detection)
             by_pid
                 .entry(conn.pid)
+                .or_default()
+                .push(conn.clone());
+
+            // Skip LISTEN sockets from pair/port indices to avoid polluting packet matching
+            if conn.tcp_state == TcpState::Listen {
+                continue;
+            }
+
+            by_local_port
+                .entry(conn.local_addr.port())
                 .or_default()
                 .push(conn.clone());
             by_pair.insert((conn.local_addr, conn.remote_addr), conn);
@@ -137,6 +146,22 @@ impl SocketSnapshot {
     /// Get all connections for a specific PID.
     pub fn connections_for_pid(&self, pid: u32) -> &[SocketConnection] {
         self.by_pid.get(&pid).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Iterate over all connections across all PIDs.
+    pub fn all_connections(&self) -> impl Iterator<Item = &SocketConnection> {
+        self.by_pid.values().flat_map(|v| v.iter())
+    }
+
+    /// Iterate over all processes: yields (pid, name, connections) for each PID.
+    pub fn all_processes(&self) -> impl Iterator<Item = (u32, String, &[SocketConnection])> {
+        self.by_pid.iter().map(|(&pid, conns)| {
+            let name = conns
+                .first()
+                .map(|c| c.proc_name.clone())
+                .unwrap_or_default();
+            (pid, name, conns.as_slice())
+        })
     }
 }
 
@@ -226,14 +251,6 @@ fn get_process_connections(pid: i32, name: &str) -> Vec<SocketConnection> {
             continue;
         };
 
-        // Skip listen sockets with no remote
-        if remote_addr.port() == 0
-            && remote_addr.ip().is_unspecified()
-            && proto == Protocol::Tcp
-        {
-            continue;
-        }
-
         connections.push(SocketConnection {
             pid: pid as u32,
             proc_name: name.to_string(),
@@ -247,9 +264,16 @@ fn get_process_connections(pid: i32, name: &str) -> Vec<SocketConnection> {
     connections
 }
 
-/// Get process name by PID. Returns None if the process has exited.
+/// Get process name by PID. Uses pidpath for full name, falls back to proc_name.
+/// Returns None if the process has exited.
 pub fn get_process_name(pid: i32) -> Option<String> {
-    proc_pid::name(pid).ok()
+    full_process_name(pid).or_else(|| proc_pid::name(pid).ok())
+}
+
+/// Get full process name via pidpath (avoids MAXCOMLEN truncation).
+fn full_process_name(pid: i32) -> Option<String> {
+    let path = proc_pid::pidpath(pid).ok()?;
+    path.rsplit('/').next().map(|s| s.to_string())
 }
 
 /// Convert raw macOS TCP state integer to our TcpState enum.

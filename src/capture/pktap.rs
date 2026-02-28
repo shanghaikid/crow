@@ -25,6 +25,7 @@ const PTH_FLAG_DIR_OUT: u32 = 0x02;
 
 /// Parsed information from a PKTAP header.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct PktapInfo {
     /// Total header length (variable, use this to find the inner packet)
     pub header_len: u32,

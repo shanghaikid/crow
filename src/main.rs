@@ -59,7 +59,7 @@ fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel();
 
     // Spawn capture thread
-    let capture_handle = thread::Builder::new()
+    let _capture_handle = thread::Builder::new()
         .name("capture".into())
         .spawn(move || {
             if let Err(e) = capture::capture_loop(cap, mode, tx) {
@@ -70,7 +70,7 @@ fn main() -> Result<()> {
 
     // Spawn aggregator thread
     let agg_state = Arc::clone(&state);
-    let aggregator_handle = thread::Builder::new()
+    let _aggregator_handle = thread::Builder::new()
         .name("aggregator".into())
         .spawn(move || {
             aggregate::aggregator_loop(rx, agg_state, mode);
@@ -80,11 +80,13 @@ fn main() -> Result<()> {
     // Run TUI on the main thread (blocks until quit)
     let tui_result = tui::run_tui(state);
 
-    // TUI exited — wait for threads to finish (channels disconnect → threads exit)
-    let _ = capture_handle.join();
-    let _ = aggregator_handle.join();
-
-    tui_result
+    // TUI exited — the capture thread is blocked in pcap::next_packet()
+    // which is an uninterruptible C call. Exit the process directly.
+    if let Err(e) = tui_result {
+        eprintln!("crow: {}", e);
+        std::process::exit(1);
+    }
+    std::process::exit(0);
 }
 
 /// Check if we have BPF access by trying to open /dev/bpf0.

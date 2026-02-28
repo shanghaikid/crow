@@ -1,10 +1,11 @@
 pub mod counter;
 pub mod dns;
+pub mod proxy;
 pub mod state;
 
 pub use state::{
-    AppState, Connection, Direction, DnsInfo, PacketEvent, ProcessInfo, Protocol, TcpState,
-    ViewMode,
+    AppState, Connection, ConnectionRoute, Direction, DnsInfo, PacketEvent, ProcessInfo, Protocol,
+    TcpState, ViewMode,
 };
 
 use std::sync::mpsc;
@@ -28,12 +29,8 @@ pub fn aggregator_loop(
     let snapshot_interval = Duration::from_millis(500);
     let process_expiry = Duration::from_secs(30);
 
-    // Initial socket snapshot for raw IP mode
-    let mut snapshot = if mode == CaptureMode::RawIp {
-        SocketSnapshot::capture()
-    } else {
-        SocketSnapshot::empty()
-    };
+    // Initial socket snapshot (needed for connection state updates and proxy detection)
+    let mut snapshot = SocketSnapshot::capture();
 
     loop {
         // Try to receive with a short timeout so we can do periodic work
@@ -64,12 +61,15 @@ pub fn aggregator_loop(
         if now.duration_since(last_snapshot) >= snapshot_interval {
             last_snapshot = now;
 
-            if mode == CaptureMode::RawIp {
-                snapshot = SocketSnapshot::capture();
-            }
+            snapshot = SocketSnapshot::capture();
+
+            let proxy_addrs = proxy::detect_proxy_listen_addrs(&snapshot);
 
             let mut app = state.write().unwrap();
+            app.proxy_listen_addrs = proxy_addrs;
+            sync_processes_from_snapshot(&mut app, &snapshot, now);
             update_connection_states(&mut app, &snapshot);
+            proxy::update_proxy_status(&mut app);
             expire_processes(&mut app, now, process_expiry);
             prune_closed_connections(&mut app);
             app.dns_cache.prune_expired();
@@ -83,8 +83,14 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
 
     // Update total counters
     match event.direction {
-        Direction::Outbound => app.total_tx.add(event.payload_len as u64, now),
-        Direction::Inbound => app.total_rx.add(event.payload_len as u64, now),
+        Direction::Outbound => {
+            app.total_tx.add(event.payload_len as u64, now);
+            app.grand_total_tx += event.payload_len as u64;
+        }
+        Direction::Inbound => {
+            app.total_rx.add(event.payload_len as u64, now);
+            app.grand_total_rx += event.payload_len as u64;
+        }
     }
 
     // Update DNS cache from DNS responses
@@ -96,21 +102,35 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
     }
 
     // Update per-process state
+    // Use pidpath for full name to avoid MAXCOMLEN (16 char) truncation
+    let full_name = if event.pid > 0 {
+        macos::get_process_name(event.pid as i32)
+            .unwrap_or(event.proc_name.clone())
+    } else {
+        event.proc_name.clone()
+    };
+
     let proc_info = app
         .processes
         .entry(event.pid)
-        .or_insert_with(|| ProcessInfo::new(event.proc_name.clone(), now));
+        .or_insert_with(|| ProcessInfo::new(full_name.clone(), now));
 
     proc_info.last_seen = now;
     proc_info.alive = true;
 
-    if !event.proc_name.is_empty() && proc_info.name.is_empty() {
-        proc_info.name.clone_from(&event.proc_name);
+    if proc_info.name.is_empty() || (proc_info.name.len() <= 16 && full_name.len() > proc_info.name.len()) {
+        proc_info.name = full_name;
     }
 
     match event.direction {
-        Direction::Outbound => proc_info.bytes_tx.add(event.payload_len as u64, now),
-        Direction::Inbound => proc_info.bytes_rx.add(event.payload_len as u64, now),
+        Direction::Outbound => {
+            proc_info.bytes_tx.add(event.payload_len as u64, now);
+            proc_info.total_tx += event.payload_len as u64;
+        }
+        Direction::Inbound => {
+            proc_info.bytes_rx.add(event.payload_len as u64, now);
+            proc_info.total_rx += event.payload_len as u64;
+        }
     }
 
     // Determine local/remote addresses
@@ -157,8 +177,66 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
                 state: TcpState::Unknown,
                 bytes_tx: tx,
                 bytes_rx: rx,
-                latency: None,
+                route: ConnectionRoute::Unknown,
             });
+        }
+    }
+}
+
+/// Discover processes from the socket snapshot that aren't yet tracked.
+/// This ensures processes with active connections appear even if their
+/// packets weren't captured (e.g., due to DLT limitations or idle connections).
+fn sync_processes_from_snapshot(app: &mut AppState, snapshot: &SocketSnapshot, now: Instant) {
+    for (pid, name, conns) in snapshot.all_processes() {
+        // Skip kernel / PID 0
+        if pid == 0 {
+            continue;
+        }
+
+        // Only care about processes with non-LISTEN connections
+        let active_conns: Vec<_> = conns
+            .iter()
+            .filter(|c| c.tcp_state != TcpState::Listen)
+            .collect();
+        if active_conns.is_empty() {
+            continue;
+        }
+
+        let proc_info = app
+            .processes
+            .entry(pid)
+            .or_insert_with(|| ProcessInfo::new(name.clone(), now));
+
+        proc_info.last_seen = now;
+        proc_info.alive = true;
+
+        if proc_info.name.is_empty() && !name.is_empty() {
+            proc_info.name.clone_from(&name);
+        }
+
+        // Add connections not yet tracked
+        for sc in &active_conns {
+            let already_tracked = proc_info.connections.iter().any(|c| {
+                c.local_addr == sc.local_addr
+                    && c.remote_addr == sc.remote_addr
+                    && c.protocol == sc.protocol
+            });
+            if !already_tracked {
+                let hostname = app
+                    .dns_cache
+                    .lookup(&sc.remote_addr.ip())
+                    .map(|s| s.to_string());
+                proc_info.connections.push(Connection {
+                    protocol: sc.protocol,
+                    local_addr: sc.local_addr,
+                    remote_addr: sc.remote_addr,
+                    remote_hostname: hostname,
+                    state: sc.tcp_state,
+                    bytes_tx: 0,
+                    bytes_rx: 0,
+                    route: ConnectionRoute::Unknown,
+                });
+            }
         }
     }
 }

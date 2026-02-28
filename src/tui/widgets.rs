@@ -31,16 +31,6 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Format a duration since an instant into a human-readable "ago" string.
-pub fn format_age(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s ago", secs)
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else {
-        format!("{}h ago", secs / 3600)
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -61,10 +51,4 @@ mod tests {
         assert_eq!(format_bytes(1536), "1.5 KB");
     }
 
-    #[test]
-    fn test_format_age() {
-        assert_eq!(format_age(5), "5s ago");
-        assert_eq!(format_age(120), "2m ago");
-        assert_eq!(format_age(7200), "2h ago");
-    }
 }
