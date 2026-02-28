@@ -58,11 +58,49 @@ fn run_loop(
         // Handle input
         if event::poll(tick_rate)? {
             if let Event::Key(key) = event::read()? {
+                // Global: Ctrl+C always quits
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    return Ok(());
+                }
+
+                // Detail view mode
+                {
+                    let in_detail = state.read().unwrap().detail_pid.is_some();
+                    if in_detail {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                let mut app = state.write().unwrap();
+                                app.detail_pid = None;
+                                app.detail_scroll = 0;
+                            }
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                let mut app = state.write().unwrap();
+                                app.detail_scroll = app.detail_scroll.saturating_add(1);
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                let mut app = state.write().unwrap();
+                                app.detail_scroll = app.detail_scroll.saturating_sub(1);
+                            }
+                            KeyCode::Char('g') => {
+                                let mut app = state.write().unwrap();
+                                app.detail_scroll = 0;
+                            }
+                            KeyCode::Char('G') => {
+                                let mut app = state.write().unwrap();
+                                let pid = app.detail_pid.unwrap();
+                                let total = app.processes.get(&pid)
+                                    .map(|p| p.packet_log.len())
+                                    .unwrap_or(0);
+                                app.detail_scroll = total;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                }
+
                 // Global keys (always work)
                 match key.code {
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(())
-                    }
                     KeyCode::Up => { move_selection(&state, -1); continue; }
                     KeyCode::Down => { move_selection(&state, 1); continue; }
                     KeyCode::Tab => {
@@ -77,20 +115,17 @@ fn run_loop(
                 if let Some(ref mut input) = filter_input {
                     match key.code {
                         KeyCode::Esc => {
-                            // Cancel: clear filter, back to normal
                             filter_input = None;
                             let mut app = state.write().unwrap();
                             app.filter = None;
                         }
                         KeyCode::Enter => {
-                            // Confirm: keep filter, select first and expand, back to normal
                             let text = input.clone();
                             filter_input = None;
                             let mut app = state.write().unwrap();
                             if text.is_empty() {
                                 app.filter = None;
                             }
-                            // Select and expand first visible process
                             let now = Instant::now();
                             let visible = app.visible_pids(now);
                             if let Some(&first_pid) = visible.first() {
@@ -127,16 +162,21 @@ fn run_loop(
                     KeyCode::Char('s') => {
                         let mut app = state.write().unwrap();
                         if app.sort_descending {
-                            // descending → next field, ascending
                             app.sort_by = app.sort_by.next();
                             app.sort_descending = false;
                         } else {
-                            // ascending → descending
                             app.sort_descending = true;
                         }
                     }
                     KeyCode::Char('/') => {
                         filter_input = Some(String::new());
+                    }
+                    KeyCode::Char('v') => {
+                        let mut app = state.write().unwrap();
+                        if let Some(pid) = app.selected_pid {
+                            app.detail_pid = Some(pid);
+                            app.detail_scroll = 0;
+                        }
                     }
                     KeyCode::Enter => {
                         let mut app = state.write().unwrap();
@@ -186,6 +226,12 @@ fn move_selection(state: &Arc<RwLock<AppState>>, delta: i32) {
 }
 
 fn draw_ui(f: &mut ratatui::Frame, app: &AppState, filter_input: &Option<String>, table_state: &mut TableState) {
+    // Detail view takes over the whole screen
+    if app.detail_pid.is_some() {
+        views::detail::render(f, f.area(), app);
+        return;
+    }
+
     let size = f.area();
 
     let chunks = Layout::default()
@@ -291,6 +337,8 @@ fn draw_help_bar(
             Span::raw("Navigate "),
             Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
             Span::raw("Expand "),
+            Span::styled("[v]", Style::default().fg(Color::Yellow)),
+            Span::raw("Detail "),
             Span::styled("[/]", Style::default().fg(Color::Yellow)),
             Span::raw("Filter "),
             Span::styled("[s]", Style::default().fg(Color::Yellow)),

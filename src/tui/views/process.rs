@@ -128,19 +128,12 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, tabl
                 );
             }
 
-            // Show recent packet log (most recent last, show last 10)
-            let log_style = Style::default().fg(Color::DarkGray);
-            let log_entries: Vec<_> = proc_info.packet_log.iter().rev().take(10).collect();
-            for entry in log_entries.into_iter().rev() {
-                let arrow = match entry.direction {
-                    crate::aggregate::Direction::Outbound => "^",
-                    crate::aggregate::Direction::Inbound => "v",
-                };
-                let ts = format_log_time(entry.elapsed_secs);
+            // Show packet log count hint if there are entries
+            if !proc_info.packet_log.is_empty() {
                 rows.push(
                     Row::new(vec![
                         String::new(),
-                        format!("    {} {} {} ({}B)", ts, arrow, entry.info, entry.size),
+                        format!("    [v] {} packet logs", proc_info.packet_log.len()),
                         String::new(),
                         String::new(),
                         String::new(),
@@ -148,7 +141,7 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, tabl
                         String::new(),
                         String::new(),
                     ])
-                    .style(log_style),
+                    .style(Style::default().fg(Color::DarkGray)),
                 );
             }
         }
@@ -219,11 +212,4 @@ fn build_header(sort_by: SortBy, descending: bool) -> Row<'static> {
         .collect();
 
     Row::new(cells)
-}
-
-fn format_log_time(elapsed_secs: f64) -> String {
-    let secs = elapsed_secs as u64;
-    let m = secs / 60;
-    let s = secs % 60;
-    format!("{m}:{s:02}")
 }

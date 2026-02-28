@@ -276,6 +276,9 @@ pub struct AppState {
     /// Tracks expansion order for Esc to undo last expand.
     pub expansion_order: Vec<u32>,
     pub filter: Option<String>,
+    /// When set, show full-screen packet log for this PID.
+    pub detail_pid: Option<u32>,
+    pub detail_scroll: usize,
     pub started_at: Instant,
     pub local_ip: String,
 }
@@ -297,6 +300,8 @@ impl AppState {
             expanded_pids: std::collections::HashSet::new(),
             expansion_order: Vec::new(),
             filter: None,
+            detail_pid: None,
+            detail_scroll: 0,
             local_ip: get_local_ip(),
             started_at: Instant::now(),
         }

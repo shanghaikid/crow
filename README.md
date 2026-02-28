@@ -52,7 +52,8 @@ sudo cargo run --release
 | Key | Action |
 |-----|--------|
 | **j/k** or **Up/Down** | Navigate process list |
-| **Enter** | Expand/collapse process (shows connections + packet log) |
+| **Enter** | Expand/collapse process (shows connections) |
+| **v** | Open packet log detail view for selected process |
 | **/** | Enter filter mode (type to filter, live preview) |
 | **Enter** (filter mode) | Confirm filter, select and expand first match |
 | **Esc** (filter mode) | Cancel filter |
@@ -62,17 +63,15 @@ sudo cargo run --release
 | **q** | Quit |
 | **Ctrl+C** | Quit |
 
-### Expanded Process View
+### Packet Log Detail View
 
-When you expand a process with **Enter**, you see:
+Select a process and press **v** to open a full-screen packet log showing all captured protocol-level events:
 
-1. **Connections** — each TCP/UDP connection with remote host, port, state, bytes transferred, and route (DIRECT/PROXY)
-2. **Packet log** — the 10 most recent protocol-level events:
-   - `TLS -> example.com` — TLS handshake SNI (shows which domain HTTPS traffic goes to)
-   - `GET /api/data` — HTTP request method and path
-   - `DNS example.com -> 3 addr` — DNS resolution results
+- `TLS -> example.com` — TLS handshake SNI (shows which domain HTTPS traffic goes to)
+- `GET /api/data` — HTTP request method and path
+- `DNS example.com -> 3 addr` — DNS resolution results
 
-Each log entry shows a timestamp, direction (^ upload / v download), and packet size.
+Each entry shows timestamp, direction (^ upload / v download), and packet size. Use **j/k** to scroll, **g/G** to jump to top/bottom, **Esc** to go back.
 
 ### CLI Options
 
