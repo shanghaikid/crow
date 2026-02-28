@@ -132,11 +132,15 @@ fn build_event(
     direction: Direction,
     now: Instant,
 ) -> Option<PacketEvent> {
-    let (protocol, src_port, dst_port, transport_payload_len, dns_info) = match proto {
+    let (protocol, src_port, dst_port, transport_payload_len, dns_info, protocol_info) = match proto {
         IpNextHeaderProtocols::Tcp => {
             let tcp = TcpPacket::new(payload)?;
-            let plen = tcp.payload().len() as u32;
-            (Protocol::Tcp, tcp.get_source(), tcp.get_destination(), plen, None)
+            let tcp_payload = tcp.payload();
+            let plen = tcp_payload.len() as u32;
+            let info = parse_tls_sni(tcp_payload)
+                .map(|sni| format!("TLS -> {}", sni))
+                .or_else(|| parse_http_request(tcp_payload));
+            (Protocol::Tcp, tcp.get_source(), tcp.get_destination(), plen, None, info)
         }
         IpNextHeaderProtocols::Udp => {
             let udp = UdpPacket::new(payload)?;
@@ -146,12 +150,13 @@ fn build_event(
                 udp.get_destination(),
                 udp.payload(),
             );
-            (Protocol::Udp, udp.get_source(), udp.get_destination(), plen, dns)
+            let info = dns.as_ref().map(|d| format!("DNS {} -> {} addr", d.query_name, d.resolved_ips.len()));
+            (Protocol::Udp, udp.get_source(), udp.get_destination(), plen, dns, info)
         }
         IpNextHeaderProtocols::Icmp | IpNextHeaderProtocols::Icmpv6 => {
-            (Protocol::Icmp, 0, 0, payload.len() as u32, None)
+            (Protocol::Icmp, 0, 0, payload.len() as u32, None, None)
         }
-        other => (Protocol::Other(other.0), 0, 0, payload.len() as u32, None),
+        other => (Protocol::Other(other.0), 0, 0, payload.len() as u32, None, None),
     };
 
     Some(PacketEvent {
@@ -164,7 +169,87 @@ fn build_event(
         dst: SocketAddr::new(dst_ip, dst_port),
         payload_len: transport_payload_len,
         dns_info,
+        protocol_info,
     })
+}
+
+/// Parse TLS ClientHello to extract SNI hostname.
+fn parse_tls_sni(data: &[u8]) -> Option<String> {
+    // Minimum TLS record: type(1) + version(2) + length(2) + handshake_type(1) = 6
+    if data.len() < 6 {
+        return None;
+    }
+    // Content type 0x16 = Handshake
+    if data[0] != 0x16 {
+        return None;
+    }
+    // Handshake type 0x01 = ClientHello
+    if data[5] != 0x01 {
+        return None;
+    }
+    // Skip: record header(5) + handshake header(4) + client version(2) + random(32) = 43
+    if data.len() < 43 {
+        return None;
+    }
+    let mut pos = 43;
+    // Session ID
+    if pos >= data.len() { return None; }
+    let session_id_len = data[pos] as usize;
+    pos += 1 + session_id_len;
+    // Cipher suites
+    if pos + 2 > data.len() { return None; }
+    let cs_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+    pos += 2 + cs_len;
+    // Compression methods
+    if pos >= data.len() { return None; }
+    let cm_len = data[pos] as usize;
+    pos += 1 + cm_len;
+    // Extensions length
+    if pos + 2 > data.len() { return None; }
+    let ext_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+    pos += 2;
+    let ext_end = pos + ext_len;
+    // Walk extensions
+    while pos + 4 <= ext_end && pos + 4 <= data.len() {
+        let ext_type = u16::from_be_bytes([data[pos], data[pos + 1]]);
+        let ext_data_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
+        pos += 4;
+        if ext_type == 0x0000 {
+            // SNI extension
+            // SNI list length(2) + type(1) + name length(2) = 5
+            if ext_data_len >= 5 && pos + 5 <= data.len() {
+                let name_len = u16::from_be_bytes([data[pos + 3], data[pos + 4]]) as usize;
+                let name_start = pos + 5;
+                if name_start + name_len <= data.len() {
+                    return std::str::from_utf8(&data[name_start..name_start + name_len])
+                        .ok()
+                        .map(|s| s.to_string());
+                }
+            }
+            return None;
+        }
+        pos += ext_data_len;
+    }
+    None
+}
+
+/// Parse HTTP request first line (e.g. "GET /path HTTP/1.1").
+fn parse_http_request(data: &[u8]) -> Option<String> {
+    // Quick check for common methods
+    let prefixes: &[&[u8]] = &[b"GET ", b"POST ", b"PUT ", b"DELETE ", b"HEAD ", b"PATCH ", b"OPTIONS ", b"CONNECT "];
+    if !prefixes.iter().any(|p| data.starts_with(p)) {
+        return None;
+    }
+    // Find end of first line
+    let end = data.iter().position(|&b| b == b'\r' || b == b'\n')
+        .unwrap_or(data.len().min(256));
+    let line = std::str::from_utf8(&data[..end]).ok()?;
+    // Strip " HTTP/1.x" suffix for brevity
+    let line = line.strip_suffix(" HTTP/1.1")
+        .or_else(|| line.strip_suffix(" HTTP/1.0"))
+        .or_else(|| line.strip_suffix(" HTTP/2"))
+        .unwrap_or(line);
+    Some(line.to_string())
 }
 
 /// If a UDP packet is from port 53, try to parse it as a DNS response.

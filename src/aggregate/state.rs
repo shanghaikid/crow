@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Instant;
 
@@ -95,6 +95,8 @@ pub struct PacketEvent {
     pub dst: SocketAddr,
     pub payload_len: u32,
     pub dns_info: Option<DnsInfo>,
+    /// Protocol-level info: HTTP request line, TLS SNI, DNS query, etc.
+    pub protocol_info: Option<String>,
 }
 
 /// A tracked network connection.
@@ -128,6 +130,18 @@ impl Connection {
     }
 }
 
+/// A recent packet activity log entry.
+#[allow(dead_code)]
+pub struct PacketLogEntry {
+    pub elapsed_secs: f64,
+    pub direction: Direction,
+    pub remote: SocketAddr,
+    pub size: u32,
+    pub info: String, // "TLS → example.com", "GET /api/data", "DNS ? example.com"
+}
+
+const MAX_PACKET_LOG: usize = 100;
+
 /// Per-process network information.
 pub struct ProcessInfo {
     pub name: String,
@@ -136,6 +150,7 @@ pub struct ProcessInfo {
     pub total_tx: u64,
     pub total_rx: u64,
     pub connections: Vec<Connection>,
+    pub packet_log: VecDeque<PacketLogEntry>,
     pub last_seen: Instant,
     pub alive: bool,
     pub is_proxy: bool,
@@ -150,10 +165,18 @@ impl ProcessInfo {
             total_tx: 0,
             total_rx: 0,
             connections: Vec::new(),
+            packet_log: VecDeque::new(),
             last_seen: now,
             alive: true,
             is_proxy: false,
         }
+    }
+
+    pub fn push_log(&mut self, entry: PacketLogEntry) {
+        if self.packet_log.len() >= MAX_PACKET_LOG {
+            self.packet_log.pop_front();
+        }
+        self.packet_log.push_back(entry);
     }
 
     /// Whether this process has any recorded traffic.
@@ -245,6 +268,7 @@ pub struct AppState {
     pub proxy_listen_addrs: HashSet<SocketAddr>,
     // TUI state
     pub sort_by: SortBy,
+    pub sort_descending: bool,
     pub view_mode: ViewMode,
     /// Selected process PID (tracks the process, not the row index)
     pub selected_pid: Option<u32>,
@@ -265,6 +289,7 @@ impl AppState {
             grand_total_rx: 0,
             proxy_listen_addrs: HashSet::new(),
             sort_by: SortBy::Traffic,
+            sort_descending: true,
             view_mode: ViewMode::Process,
             selected_pid: None,
             expanded_pids: std::collections::HashSet::new(),
@@ -306,6 +331,7 @@ impl AppState {
             .iter()
             .filter(|(_, p)| p.has_traffic());
 
+        let desc = self.sort_descending;
         let mut pids: Vec<u32> = match self.sort_by {
             SortBy::Traffic => {
                 let mut keyed: Vec<(u32, f64)> = active
@@ -315,9 +341,9 @@ impl AppState {
                     })
                     .collect();
                 keyed.sort_by(|a, b| {
-                    b.1.partial_cmp(&a.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then(a.0.cmp(&b.0))
+                    let ord = a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal);
+                    let ord = if desc { ord.reverse() } else { ord };
+                    ord.then(a.0.cmp(&b.0))
                 });
                 keyed.into_iter().map(|(pid, _)| pid).collect()
             }
@@ -325,19 +351,28 @@ impl AppState {
                 let mut keyed: Vec<(u32, usize)> = active
                     .map(|(&pid, p)| (pid, p.connections.len()))
                     .collect();
-                keyed.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                keyed.sort_by(|a, b| {
+                    let ord = a.1.cmp(&b.1);
+                    let ord = if desc { ord.reverse() } else { ord };
+                    ord.then(a.0.cmp(&b.0))
+                });
                 keyed.into_iter().map(|(pid, _)| pid).collect()
             }
             SortBy::Pid => {
                 let mut p: Vec<u32> = active.map(|(&pid, _)| pid).collect();
                 p.sort();
+                if desc { p.reverse(); }
                 p
             }
             SortBy::Name => {
                 let mut keyed: Vec<(u32, &str)> = active
                     .map(|(&pid, p)| (pid, p.name.as_str()))
                     .collect();
-                keyed.sort_by(|a, b| a.1.cmp(b.1).then(a.0.cmp(&b.0)));
+                keyed.sort_by(|a, b| {
+                    let ord = a.1.cmp(b.1);
+                    let ord = if desc { ord.reverse() } else { ord };
+                    ord.then(a.0.cmp(&b.0))
+                });
                 keyed.into_iter().map(|(pid, _)| pid).collect()
             }
         };

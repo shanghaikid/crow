@@ -4,8 +4,8 @@ pub mod proxy;
 pub mod state;
 
 pub use state::{
-    AppState, Connection, ConnectionRoute, Direction, DnsInfo, PacketEvent, ProcessInfo, Protocol,
-    TcpState, ViewMode,
+    AppState, Connection, ConnectionRoute, Direction, DnsInfo, PacketEvent, PacketLogEntry,
+    ProcessInfo, Protocol, TcpState, ViewMode,
 };
 
 use std::sync::mpsc;
@@ -105,9 +105,10 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
     // Use pidpath for full name to avoid MAXCOMLEN (16 char) truncation
     let full_name = if event.pid > 0 {
         macos::get_process_name(event.pid as i32)
-            .unwrap_or(event.proc_name.clone())
+            .or_else(|| if event.proc_name.is_empty() { None } else { Some(event.proc_name.clone()) })
+            .unwrap_or_else(|| format!("<{}>", event.pid))
     } else {
-        event.proc_name.clone()
+        if event.proc_name.is_empty() { "kernel".to_string() } else { event.proc_name.clone() }
     };
 
     let proc_info = app
@@ -142,6 +143,18 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
         Direction::Outbound => event.src,
         Direction::Inbound => event.dst,
     };
+
+    // Record packet log if there's interesting protocol info
+    if let Some(ref info) = event.protocol_info {
+        let elapsed = now.duration_since(app.started_at).as_secs_f64();
+        proc_info.push_log(PacketLogEntry {
+            elapsed_secs: elapsed,
+            direction: event.direction,
+            remote: remote_addr,
+            size: event.payload_len,
+            info: info.clone(),
+        });
+    }
 
     // Look up hostname for remote address
     let hostname = app

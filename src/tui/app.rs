@@ -124,7 +124,14 @@ fn run_loop(
                     KeyCode::Char('k') => move_selection(&state, -1),
                     KeyCode::Char('s') => {
                         let mut app = state.write().unwrap();
-                        app.sort_by = app.sort_by.next();
+                        if app.sort_descending {
+                            // descending → next field, ascending
+                            app.sort_by = app.sort_by.next();
+                            app.sort_descending = false;
+                        } else {
+                            // ascending → descending
+                            app.sort_descending = true;
+                        }
                     }
                     KeyCode::Char('/') => {
                         filter_input = Some(String::new());
@@ -279,7 +286,10 @@ fn draw_help_bar(
             Span::styled("[/]", Style::default().fg(Color::Yellow)),
             Span::raw("Filter "),
             Span::styled("[s]", Style::default().fg(Color::Yellow)),
-            Span::raw(format!("Sort:{} ", app.sort_by.label())),
+            Span::raw(format!("Sort:{}{} ",
+                app.sort_by.label(),
+                if app.sort_descending { "▼" } else { "▲" },
+            )),
             Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
             Span::raw(format!("View:{} ", app.view_mode.label())),
         ];

@@ -4,10 +4,11 @@ use std::time::Instant;
 
 use ratatui::layout::Constraint;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Row, Table, TableState};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Cell, Row, Table, TableState};
 use ratatui::Frame;
 
-use crate::aggregate::state::ConnectionRoute;
+use crate::aggregate::state::{ConnectionRoute, SortBy};
 use crate::aggregate::AppState;
 use crate::tui::widgets::{format_bytes, format_rate};
 
@@ -126,20 +127,37 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, tabl
                     .style(conn_style),
                 );
             }
+
+            // Show recent packet log (most recent last, show last 10)
+            let log_style = Style::default().fg(Color::DarkGray);
+            let log_entries: Vec<_> = proc_info.packet_log.iter().rev().take(10).collect();
+            for entry in log_entries.into_iter().rev() {
+                let arrow = match entry.direction {
+                    crate::aggregate::Direction::Outbound => "^",
+                    crate::aggregate::Direction::Inbound => "v",
+                };
+                let ts = format_log_time(entry.elapsed_secs);
+                rows.push(
+                    Row::new(vec![
+                        String::new(),
+                        format!("    {} {} {} ({}B)", ts, arrow, entry.info, entry.size),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                    ])
+                    .style(log_style),
+                );
+            }
         }
     }
 
     // Update table state for scroll tracking
     table_state.select(selected_row);
 
-    let header = Row::new(vec![
-        "PID", "Process", "Up/s", "Down/s", "Total Up", "Total Dn", "Conns", "Route",
-    ])
-    .style(
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    );
+    let header = build_header(state.sort_by, state.sort_descending);
 
     let widths = [
         Constraint::Length(8),
@@ -159,4 +177,53 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, tabl
         .block(Block::default().borders(Borders::NONE));
 
     f.render_stateful_widget(table, area, table_state);
+}
+
+/// Build the header row with a sort indicator on the active column.
+fn build_header(sort_by: SortBy, descending: bool) -> Row<'static> {
+    let normal = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let active = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    let columns: &[(&str, Option<SortBy>)] = &[
+        ("PID", Some(SortBy::Pid)),
+        ("Process", Some(SortBy::Name)),
+        ("Up/s", Some(SortBy::Traffic)),
+        ("Down/s", None),       // part of Traffic sort
+        ("Total Up", None),
+        ("Total Dn", None),
+        ("Conns", Some(SortBy::Connections)),
+        ("Route", None),
+    ];
+
+    let arrow = if descending { " ▼" } else { " ▲" };
+
+    let cells: Vec<Cell> = columns
+        .iter()
+        .map(|(label, key)| {
+            let is_active = key.map(|k| k == sort_by).unwrap_or(false)
+                || (*label == "Down/s" && sort_by == SortBy::Traffic);
+
+            if is_active {
+                Cell::from(Line::from(vec![
+                    Span::styled(label.to_string(), active),
+                    Span::styled(arrow, active),
+                ]))
+            } else {
+                Cell::from(Span::styled(label.to_string(), normal))
+            }
+        })
+        .collect();
+
+    Row::new(cells)
+}
+
+fn format_log_time(elapsed_secs: f64) -> String {
+    let secs = elapsed_secs as u64;
+    let m = secs / 60;
+    let s = secs % 60;
+    format!("{m}:{s:02}")
 }
