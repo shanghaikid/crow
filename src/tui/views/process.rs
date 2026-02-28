@@ -14,6 +14,7 @@ use crate::tui::widgets::{format_age, format_rate};
 pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     let now = Instant::now();
     let pids = state.sorted_pids(now);
+    let filter_lower = state.filter.as_ref().map(|f| f.to_lowercase());
 
     let mut rows: Vec<Row> = Vec::new();
     let is_selected = |pid: u32| state.selected_pid == Some(pid);
@@ -25,17 +26,8 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
         };
 
         // Apply filter
-        if let Some(ref filter) = state.filter {
-            let filter_lower = filter.to_lowercase();
-            let name_matches = proc_info.name.to_lowercase().contains(&filter_lower);
-            let conn_matches = proc_info.connections.iter().any(|c| {
-                c.remote_hostname
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .contains(&filter_lower)
-            });
-            if !name_matches && !conn_matches {
+        if let Some(ref fl) = filter_lower {
+            if !proc_info.matches_filter(fl) {
                 continue;
             }
         }
@@ -79,14 +71,14 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
         // Show connections if expanded
         if expanded {
             for conn in &proc_info.connections {
-                let hostname = conn
-                    .remote_hostname
-                    .as_deref()
-                    .unwrap_or("");
-                let remote = if hostname.is_empty() {
-                    conn.remote_addr.to_string()
+                let remote = if let Some(ref hostname) = conn.remote_hostname {
+                    if hostname.is_empty() {
+                        conn.remote_addr.to_string()
+                    } else {
+                        format!("{}  {}", conn.remote_addr, hostname)
+                    }
                 } else {
-                    format!("{}  {}", conn.remote_addr, hostname)
+                    conn.remote_addr.to_string()
                 };
 
                 let conn_style = if !proc_info.alive {

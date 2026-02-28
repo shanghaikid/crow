@@ -13,7 +13,7 @@ pub enum Direction {
 }
 
 /// Network protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Protocol {
     Tcp,
     Udp,
@@ -100,11 +100,18 @@ impl Connection {
             Protocol::Other(_) => "OTHER",
         }
     }
+
+    /// Display the remote endpoint: hostname if available, otherwise IP.
+    pub fn remote_display(&self) -> String {
+        match self.remote_hostname.as_deref() {
+            Some(h) if !h.is_empty() => h.to_string(),
+            _ => self.remote_addr.ip().to_string(),
+        }
+    }
 }
 
 /// Per-process network information.
 pub struct ProcessInfo {
-    pub pid: u32,
     pub name: String,
     pub bytes_tx: RollingCounter,
     pub bytes_rx: RollingCounter,
@@ -115,9 +122,8 @@ pub struct ProcessInfo {
 }
 
 impl ProcessInfo {
-    pub fn new(pid: u32, name: String, now: Instant) -> Self {
+    pub fn new(name: String, now: Instant) -> Self {
         Self {
-            pid,
             name,
             bytes_tx: RollingCounter::new(),
             bytes_rx: RollingCounter::new(),
@@ -126,6 +132,22 @@ impl ProcessInfo {
             last_seen: now,
             alive: true,
         }
+    }
+
+    /// Check if this process matches a filter string (case-insensitive).
+    /// Matches against process name, connection hostnames, and remote addresses.
+    pub fn matches_filter(&self, filter_lower: &str) -> bool {
+        if self.name.to_lowercase().contains(filter_lower) {
+            return true;
+        }
+        self.connections.iter().any(|c| {
+            c.remote_hostname
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains(filter_lower)
+                || c.remote_addr.to_string().contains(filter_lower)
+        })
     }
 }
 
@@ -190,8 +212,6 @@ pub struct AppState {
     pub dns_cache: DnsCache,
     pub total_tx: RollingCounter,
     pub total_rx: RollingCounter,
-    pub total_connections: usize,
-
     // TUI state
     pub sort_by: SortBy,
     pub view_mode: ViewMode,
@@ -208,7 +228,6 @@ impl AppState {
             dns_cache: DnsCache::new(),
             total_tx: RollingCounter::new(),
             total_rx: RollingCounter::new(),
-            total_connections: 0,
             sort_by: SortBy::Traffic,
             view_mode: ViewMode::Process,
             selected_pid: None,
@@ -217,43 +236,55 @@ impl AppState {
         }
     }
 
+    /// Total number of tracked connections across all processes.
+    pub fn total_connections(&self) -> usize {
+        self.processes.values().map(|p| p.connections.len()).sum()
+    }
+
     /// Return PIDs sorted according to current sort criteria.
-    /// All sort modes use PID as a stable tiebreaker to prevent jitter.
+    /// Pre-computes sort keys (Schwartzian transform) to avoid redundant work.
     pub fn sorted_pids(&self, now: Instant) -> Vec<u32> {
-        let mut pids: Vec<u32> = self.processes.keys().copied().collect();
         match self.sort_by {
             SortBy::Traffic => {
-                pids.sort_by(|a, b| {
-                    let rate_a = self.processes[a].bytes_tx.rate_1s(now)
-                        + self.processes[a].bytes_rx.rate_1s(now);
-                    let rate_b = self.processes[b].bytes_tx.rate_1s(now)
-                        + self.processes[b].bytes_rx.rate_1s(now);
-                    rate_b
-                        .partial_cmp(&rate_a)
+                let mut keyed: Vec<(u32, f64)> = self
+                    .processes
+                    .iter()
+                    .map(|(&pid, p)| {
+                        let rate = p.bytes_tx.rate_1s(now) + p.bytes_rx.rate_1s(now);
+                        (pid, rate)
+                    })
+                    .collect();
+                keyed.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1)
                         .unwrap_or(std::cmp::Ordering::Equal)
-                        .then(a.cmp(b))
+                        .then(a.0.cmp(&b.0))
                 });
+                keyed.into_iter().map(|(pid, _)| pid).collect()
             }
             SortBy::Connections => {
-                pids.sort_by(|a, b| {
-                    self.processes[b]
-                        .connections
-                        .len()
-                        .cmp(&self.processes[a].connections.len())
-                        .then(a.cmp(b))
-                });
+                let mut keyed: Vec<(u32, usize)> = self
+                    .processes
+                    .iter()
+                    .map(|(&pid, p)| (pid, p.connections.len()))
+                    .collect();
+                keyed.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                keyed.into_iter().map(|(pid, _)| pid).collect()
             }
             SortBy::Pid => {
+                let mut pids: Vec<u32> = self.processes.keys().copied().collect();
                 pids.sort();
+                pids
             }
             SortBy::Name => {
-                pids.sort_by(|a, b| {
-                    self.processes[a].name.cmp(&self.processes[b].name)
-                        .then(a.cmp(b))
-                });
+                let mut keyed: Vec<(u32, &str)> = self
+                    .processes
+                    .iter()
+                    .map(|(&pid, p)| (pid, p.name.as_str()))
+                    .collect();
+                keyed.sort_by(|a, b| a.1.cmp(b.1).then(a.0.cmp(&b.0)));
+                keyed.into_iter().map(|(pid, _)| pid).collect()
             }
         }
-        pids
     }
 }
 

@@ -80,9 +80,9 @@ fn main() -> Result<()> {
     // Run TUI on the main thread (blocks until quit)
     let tui_result = tui::run_tui(state);
 
-    // TUI exited — threads will stop when channels disconnect
-    drop(capture_handle);
-    drop(aggregator_handle);
+    // TUI exited — wait for threads to finish (channels disconnect → threads exit)
+    let _ = capture_handle.join();
+    let _ = aggregator_handle.join();
 
     tui_result
 }

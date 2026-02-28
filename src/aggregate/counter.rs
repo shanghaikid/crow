@@ -40,6 +40,7 @@ impl RollingCounter {
     }
 
     /// Total bytes recorded within the max window.
+    #[allow(dead_code)]
     pub fn total_in_window(&self, window: Duration, now: Instant) -> u64 {
         let cutoff = now - window;
         self.samples
@@ -55,6 +56,7 @@ impl RollingCounter {
     }
 
     /// Rate over the last 5 seconds.
+    #[allow(dead_code)]
     pub fn rate_5s(&self, now: Instant) -> f64 {
         self.rate(Duration::from_secs(5), now)
     }

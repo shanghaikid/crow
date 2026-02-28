@@ -1,6 +1,6 @@
 //! Domain view: grouped by destination hostname, showing which processes connect.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::layout::Constraint;
 use ratatui::style::{Color, Modifier, Style};
@@ -11,7 +11,7 @@ use crate::aggregate::AppState;
 use crate::tui::widgets::format_bytes;
 
 struct DomainEntry {
-    processes: Vec<String>,
+    processes: HashSet<String>,
     total_tx: u64,
     total_rx: u64,
     conn_count: usize,
@@ -20,35 +20,29 @@ struct DomainEntry {
 pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     // Aggregate connections by hostname
     let mut domains: HashMap<String, DomainEntry> = HashMap::new();
+    let filter_lower = state.filter.as_ref().map(|f| f.to_lowercase());
 
     for proc_info in state.processes.values() {
         for conn in &proc_info.connections {
-            let hostname = conn
-                .remote_hostname
-                .as_deref()
-                .unwrap_or(&conn.remote_addr.ip().to_string())
-                .to_string();
+            let hostname = conn.remote_display();
 
             // Apply filter
-            if let Some(ref filter) = state.filter {
-                let filter_lower = filter.to_lowercase();
-                if !hostname.to_lowercase().contains(&filter_lower)
-                    && !proc_info.name.to_lowercase().contains(&filter_lower)
+            if let Some(ref fl) = filter_lower {
+                if !hostname.to_lowercase().contains(fl.as_str())
+                    && !proc_info.name.to_lowercase().contains(fl.as_str())
                 {
                     continue;
                 }
             }
 
             let entry = domains.entry(hostname).or_insert_with(|| DomainEntry {
-                processes: Vec::new(),
+                processes: HashSet::new(),
                 total_tx: 0,
                 total_rx: 0,
                 conn_count: 0,
             });
 
-            if !entry.processes.contains(&proc_info.name) {
-                entry.processes.push(proc_info.name.clone());
-            }
+            entry.processes.insert(proc_info.name.clone());
             entry.total_tx += conn.bytes_tx;
             entry.total_rx += conn.bytes_rx;
             entry.conn_count += 1;
@@ -66,10 +60,11 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     let rows: Vec<Row> = sorted
         .iter()
         .map(|(hostname, entry)| {
-            let procs = entry.processes.join(", ");
+            let mut procs: Vec<&str> = entry.processes.iter().map(|s| s.as_str()).collect();
+            procs.sort();
             Row::new(vec![
                 hostname.clone(),
-                procs,
+                procs.join(", "),
                 entry.conn_count.to_string(),
                 format_bytes(entry.total_tx),
                 format_bytes(entry.total_rx),

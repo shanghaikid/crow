@@ -19,8 +19,9 @@ pub const DLT_PKTAP: i32 = 149;
 pub const PTH_TYPE_PACKET: u32 = 1;
 
 // Direction flags
-pub const PTH_FLAG_DIR_IN: u32 = 0x01;
-pub const PTH_FLAG_DIR_OUT: u32 = 0x02;
+const PTH_FLAG_DIR_IN: u32 = 0x01;
+#[cfg(test)]
+const PTH_FLAG_DIR_OUT: u32 = 0x02;
 
 /// Parsed information from a PKTAP header.
 #[derive(Debug)]
@@ -47,11 +48,6 @@ impl PktapInfo {
     /// Whether this packet is inbound.
     pub fn is_inbound(&self) -> bool {
         self.flags & PTH_FLAG_DIR_IN != 0
-    }
-
-    /// Whether this packet is outbound.
-    pub fn is_outbound(&self) -> bool {
-        self.flags & PTH_FLAG_DIR_OUT != 0
     }
 }
 
@@ -146,7 +142,6 @@ mod tests {
         let info = parse_pktap_header(&data).unwrap();
         assert_eq!(info.pid, 1234);
         assert_eq!(info.proc_name, "curl");
-        assert!(info.is_outbound());
         assert!(!info.is_inbound());
         assert_eq!(info.ifname, "en0");
         assert_eq!(info.header_len, 108);

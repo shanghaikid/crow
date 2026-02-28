@@ -13,6 +13,7 @@ use crate::tui::widgets::format_bytes;
 pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     let now = Instant::now();
     let pids = state.sorted_pids(now);
+    let filter_lower = state.filter.as_ref().map(|f| f.to_lowercase());
 
     let mut rows: Vec<Row> = Vec::new();
 
@@ -24,26 +25,13 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
 
         for conn in &proc_info.connections {
             // Apply filter
-            if let Some(ref filter) = state.filter {
-                let filter_lower = filter.to_lowercase();
-                let matches = proc_info.name.to_lowercase().contains(&filter_lower)
-                    || conn
-                        .remote_hostname
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_lowercase()
-                        .contains(&filter_lower)
-                    || conn.remote_addr.to_string().contains(&filter_lower);
-                if !matches {
+            if let Some(ref fl) = filter_lower {
+                if !proc_info.matches_filter(fl) {
                     continue;
                 }
             }
 
-            let remote = conn
-                .remote_hostname
-                .as_deref()
-                .unwrap_or(&conn.remote_addr.ip().to_string())
-                .to_string();
+            let remote = conn.remote_display();
 
             let style = if !proc_info.alive {
                 Style::default().fg(Color::DarkGray)

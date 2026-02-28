@@ -15,7 +15,7 @@ use pnet_packet::udp::UdpPacket;
 use pnet_packet::Packet;
 
 use crate::aggregate::{Direction, DnsInfo, PacketEvent, Protocol};
-use crate::capture::pktap::{PktapInfo, PTH_FLAG_DIR_IN};
+use crate::capture::pktap::PktapInfo;
 
 /// AF_INET on macOS
 const AF_INET: u32 = 2;
@@ -27,7 +27,7 @@ const DLT_RAW: u32 = 12;
 
 /// Parse a captured packet (with PKTAP header already stripped) into a PacketEvent.
 pub fn parse_packet(pktap: &PktapInfo, inner_data: &[u8], now: Instant) -> Option<PacketEvent> {
-    let direction = if pktap.flags & PTH_FLAG_DIR_IN != 0 {
+    let direction = if pktap.is_inbound() {
         Direction::Inbound
     } else {
         Direction::Outbound
@@ -164,10 +164,7 @@ fn build_event(
 }
 
 /// If a UDP packet is from port 53, try to parse it as a DNS response.
-fn parse_dns_if_applicable(src_port: u16, dst_port: u16, payload: &[u8]) -> Option<DnsInfo> {
-    if src_port != 53 && dst_port != 53 {
-        return None;
-    }
+fn parse_dns_if_applicable(src_port: u16, _dst_port: u16, payload: &[u8]) -> Option<DnsInfo> {
     if src_port != 53 {
         return None;
     }

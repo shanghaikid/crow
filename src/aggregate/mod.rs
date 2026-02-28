@@ -44,12 +44,7 @@ pub fn aggregator_loop(
                     if let Some(m) = snapshot.match_packet(&event.src, &event.dst) {
                         event.pid = m.pid;
                         event.proc_name = m.name;
-                        // Determine direction: if src port matches a local socket, it's outbound
-                        if snapshot.lookup_by_port(event.src.port(), &event.dst).is_some() {
-                            event.direction = Direction::Outbound;
-                        } else {
-                            event.direction = Direction::Inbound;
-                        }
+                        event.direction = m.direction;
                     } else {
                         // Can't attribute this packet — skip it
                         continue;
@@ -74,8 +69,9 @@ pub fn aggregator_loop(
             }
 
             let mut app = state.write().unwrap();
-            update_connection_states(&mut app, &snapshot, mode);
+            update_connection_states(&mut app, &snapshot);
             expire_processes(&mut app, now, process_expiry);
+            prune_closed_connections(&mut app);
             app.dns_cache.prune_expired();
         }
     }
@@ -103,7 +99,7 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
     let proc_info = app
         .processes
         .entry(event.pid)
-        .or_insert_with(|| ProcessInfo::new(event.pid, event.proc_name.clone(), now));
+        .or_insert_with(|| ProcessInfo::new(event.proc_name.clone(), now));
 
     proc_info.last_seen = now;
     proc_info.alive = true;
@@ -168,7 +164,7 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
 }
 
 /// Update TCP connection states from the socket snapshot.
-fn update_connection_states(app: &mut AppState, snapshot: &SocketSnapshot, _mode: CaptureMode) {
+fn update_connection_states(app: &mut AppState, snapshot: &SocketSnapshot) {
     let pids: Vec<u32> = app.processes.keys().copied().collect();
 
     for pid in pids {
@@ -194,12 +190,6 @@ fn update_connection_states(app: &mut AppState, snapshot: &SocketSnapshot, _mode
             }
         }
     }
-
-    app.total_connections = app
-        .processes
-        .values()
-        .map(|p| p.connections.len())
-        .sum();
 }
 
 /// Remove processes that have been dead for longer than `expiry`.
@@ -207,4 +197,14 @@ fn expire_processes(app: &mut AppState, now: Instant, expiry: Duration) {
     app.processes.retain(|_, p| {
         p.alive || now.duration_since(p.last_seen) < expiry
     });
+}
+
+/// Remove connections in terminal states (Closed, TimeWait) to prevent unbounded growth.
+fn prune_closed_connections(app: &mut AppState) {
+    for proc_info in app.processes.values_mut() {
+        proc_info.connections.retain(|c| {
+            c.protocol != Protocol::Tcp
+                || !matches!(c.state, TcpState::Closed | TcpState::TimeWait)
+        });
+    }
 }

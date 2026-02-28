@@ -101,33 +101,15 @@ fn run_loop(
                         return Ok(())
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        let mut app = state.write().unwrap();
-                        let now = Instant::now();
-                        let pids = app.sorted_pids(now);
-                        let cur_idx = app.selected_pid
-                            .and_then(|p| pids.iter().position(|&x| x == p))
-                            .unwrap_or(0);
-                        let new_idx = cur_idx.saturating_sub(1);
-                        app.selected_pid = pids.get(new_idx).copied();
+                        move_selection(&state, -1);
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        let mut app = state.write().unwrap();
-                        let now = Instant::now();
-                        let pids = app.sorted_pids(now);
-                        let cur_idx = app.selected_pid
-                            .and_then(|p| pids.iter().position(|&x| x == p))
-                            .unwrap_or(0);
-                        let new_idx = (cur_idx + 1).min(pids.len().saturating_sub(1));
-                        app.selected_pid = pids.get(new_idx).copied();
+                        move_selection(&state, 1);
                     }
                     KeyCode::Enter => {
-                        let app = state.read().unwrap();
+                        let mut app = state.write().unwrap();
                         if let Some(pid) = app.selected_pid {
-                            drop(app);
-                            let mut app = state.write().unwrap();
-                            if app.expanded_pids.contains(&pid) {
-                                app.expanded_pids.remove(&pid);
-                            } else {
+                            if !app.expanded_pids.remove(&pid) {
                                 app.expanded_pids.insert(pid);
                             }
                         }
@@ -148,6 +130,26 @@ fn run_loop(
             }
         }
     }
+}
+
+/// Move the process selection up (delta=-1) or down (delta=1).
+fn move_selection(state: &Arc<RwLock<AppState>>, delta: i32) {
+    let mut app = state.write().unwrap();
+    let now = Instant::now();
+    let pids = app.sorted_pids(now);
+    if pids.is_empty() {
+        return;
+    }
+    let cur_idx = app
+        .selected_pid
+        .and_then(|p| pids.iter().position(|&x| x == p))
+        .unwrap_or(0);
+    let new_idx = if delta < 0 {
+        cur_idx.saturating_sub((-delta) as usize)
+    } else {
+        (cur_idx + delta as usize).min(pids.len() - 1)
+    };
+    app.selected_pid = pids.get(new_idx).copied();
 }
 
 fn draw_ui(f: &mut ratatui::Frame, app: &AppState, filter_input: &Option<String>) {
@@ -188,7 +190,7 @@ fn draw_stats_bar(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
         Span::raw("  |  "),
         Span::raw(format!(
             "Connections: {}  |  Processes: {}",
-            app.total_connections, proc_count
+            app.total_connections(), proc_count
         )),
     ]);
 
