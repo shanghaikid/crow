@@ -16,7 +16,7 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     let pids = state.sorted_pids(now);
 
     let mut rows: Vec<Row> = Vec::new();
-    let mut visual_index = 0usize;
+    let is_selected = |pid: u32| state.selected_pid == Some(pid);
 
     for &pid in &pids {
         let proc_info = match state.processes.get(&pid) {
@@ -47,7 +47,7 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
 
         let style = if !proc_info.alive {
             Style::default().fg(Color::DarkGray)
-        } else if visual_index == state.selected_index {
+        } else if is_selected(pid) {
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
@@ -75,7 +75,6 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
             ])
             .style(style),
         );
-        visual_index += 1;
 
         // Show connections if expanded
         if expanded {

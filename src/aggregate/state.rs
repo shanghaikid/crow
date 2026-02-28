@@ -195,7 +195,8 @@ pub struct AppState {
     // TUI state
     pub sort_by: SortBy,
     pub view_mode: ViewMode,
-    pub selected_index: usize,
+    /// Selected process PID (tracks the process, not the row index)
+    pub selected_pid: Option<u32>,
     pub expanded_pids: std::collections::HashSet<u32>,
     pub filter: Option<String>,
 }
@@ -210,13 +211,14 @@ impl AppState {
             total_connections: 0,
             sort_by: SortBy::Traffic,
             view_mode: ViewMode::Process,
-            selected_index: 0,
+            selected_pid: None,
             expanded_pids: std::collections::HashSet::new(),
             filter: None,
         }
     }
 
     /// Return PIDs sorted according to current sort criteria.
+    /// All sort modes use PID as a stable tiebreaker to prevent jitter.
     pub fn sorted_pids(&self, now: Instant) -> Vec<u32> {
         let mut pids: Vec<u32> = self.processes.keys().copied().collect();
         match self.sort_by {
@@ -229,6 +231,7 @@ impl AppState {
                     rate_b
                         .partial_cmp(&rate_a)
                         .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.cmp(b))
                 });
             }
             SortBy::Connections => {
@@ -237,13 +240,17 @@ impl AppState {
                         .connections
                         .len()
                         .cmp(&self.processes[a].connections.len())
+                        .then(a.cmp(b))
                 });
             }
             SortBy::Pid => {
                 pids.sort();
             }
             SortBy::Name => {
-                pids.sort_by(|a, b| self.processes[a].name.cmp(&self.processes[b].name));
+                pids.sort_by(|a, b| {
+                    self.processes[a].name.cmp(&self.processes[b].name)
+                        .then(a.cmp(b))
+                });
             }
         }
         pids

@@ -102,21 +102,29 @@ fn run_loop(
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         let mut app = state.write().unwrap();
-                        app.selected_index = app.selected_index.saturating_sub(1);
+                        let now = Instant::now();
+                        let pids = app.sorted_pids(now);
+                        let cur_idx = app.selected_pid
+                            .and_then(|p| pids.iter().position(|&x| x == p))
+                            .unwrap_or(0);
+                        let new_idx = cur_idx.saturating_sub(1);
+                        app.selected_pid = pids.get(new_idx).copied();
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
                         let mut app = state.write().unwrap();
-                        let max = app.processes.len().saturating_sub(1);
-                        if app.selected_index < max {
-                            app.selected_index += 1;
-                        }
-                    }
-                    KeyCode::Enter => {
-                        let mut app = state.write().unwrap();
-                        // Toggle expand for the selected process
                         let now = Instant::now();
                         let pids = app.sorted_pids(now);
-                        if let Some(&pid) = pids.get(app.selected_index) {
+                        let cur_idx = app.selected_pid
+                            .and_then(|p| pids.iter().position(|&x| x == p))
+                            .unwrap_or(0);
+                        let new_idx = (cur_idx + 1).min(pids.len().saturating_sub(1));
+                        app.selected_pid = pids.get(new_idx).copied();
+                    }
+                    KeyCode::Enter => {
+                        let app = state.read().unwrap();
+                        if let Some(pid) = app.selected_pid {
+                            drop(app);
+                            let mut app = state.write().unwrap();
                             if app.expanded_pids.contains(&pid) {
                                 app.expanded_pids.remove(&pid);
                             } else {
