@@ -1,5 +1,7 @@
 //! Connection view: flat list of all connections, one per row.
 
+use std::collections::HashSet;
+use std::net::IpAddr;
 use std::time::Instant;
 
 use ratatui::layout::Constraint;
@@ -19,18 +21,19 @@ struct ConnRow {
     proto: &'static str,
     local: String,
     remote: String,
+    remote_ip: IpAddr,
     state: TcpState,
     route: ConnectionRoute,
     tx: u64,
     rx: u64,
 }
 
-pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, table_state: &mut TableState) {
+/// Build the sorted list of connection rows (shared logic for render + selection).
+fn build_rows(state: &AppState) -> Vec<ConnRow> {
     let now = Instant::now();
     let pids = state.sorted_pids(now);
     let filter_lower = state.filter.as_ref().map(|f| f.to_lowercase());
 
-    // Collect data for sorting
     let mut conn_rows: Vec<ConnRow> = Vec::new();
 
     for &pid in &pids {
@@ -55,6 +58,7 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, tabl
                 proto: conn.protocol_str(),
                 local: conn.local_addr.to_string(),
                 remote: format!("{}:{}", remote, conn.remote_addr.port()),
+                remote_ip: conn.remote_addr.ip(),
                 state: conn.state,
                 route: conn.route,
                 tx: conn.bytes_tx,
@@ -84,8 +88,28 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, tabl
         if desc { ord.reverse() } else { ord }
     });
 
+    conn_rows
+}
+
+/// Get the remote IP and label for the currently selected row.
+pub fn selected_ip(state: &AppState, selected: usize) -> Option<(IpAddr, String)> {
+    let rows = build_rows(state);
+    rows.get(selected).map(|r| (r.remote_ip, r.remote.clone()))
+}
+
+pub fn render(
+    f: &mut Frame,
+    area: ratatui::layout::Rect,
+    state: &AppState,
+    table_state: &mut TableState,
+    blocked_ips: &HashSet<IpAddr>,
+) {
+    let conn_rows = build_rows(state);
+
     // Build rows
     let rows: Vec<Row> = conn_rows.iter().map(|cr| {
+        let is_blocked = blocked_ips.contains(&cr.remote_ip);
+
         let name_style = if !cr.alive {
             Style::default().fg(Color::DarkGray)
         } else if cr.is_proxy {
@@ -131,15 +155,23 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, tabl
 
         let base_style = if !cr.alive {
             Style::default().fg(Color::DarkGray)
+        } else if is_blocked {
+            Style::default().fg(Color::Red)
         } else {
             Style::default()
+        };
+
+        let remote_display = if is_blocked {
+            format!("[B] {}", cr.remote)
+        } else {
+            cr.remote.clone()
         };
 
         Row::new(vec![
             Cell::from(Span::styled(cr.proc_name.clone(), name_style)),
             Cell::from(Span::styled(cr.proto.to_string(), proto_style)),
             Cell::from(Span::styled(cr.local.clone(), base_style)),
-            Cell::from(Span::styled(cr.remote.clone(), base_style)),
+            Cell::from(Span::styled(remote_display, base_style)),
             Cell::from(Span::styled(cr.state.to_string(), state_style)),
             Cell::from(Span::styled(cr.route.to_string(), route_style)),
             Cell::from(Span::styled(format_bytes(cr.tx), base_style)),

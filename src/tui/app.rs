@@ -1,6 +1,8 @@
 //! TUI main loop: rendering, keyboard events, and view dispatching.
 
+use std::collections::HashSet;
 use std::io;
+use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -16,12 +18,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, TableState};
 use ratatui::Terminal;
 
-use crate::aggregate::{AppState, ViewMode};
+use crate::aggregate::{AppState, BlockAction, ViewMode};
+use crate::firewall::Firewall;
 use crate::tui::views;
 use crate::tui::widgets::{format_bytes, format_rate};
 
 /// Run the TUI. Blocks until the user quits.
-pub fn run_tui(state: Arc<RwLock<AppState>>) -> anyhow::Result<()> {
+pub fn run_tui(state: Arc<RwLock<AppState>>, firewall: &mut Firewall) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -30,7 +33,7 @@ pub fn run_tui(state: Arc<RwLock<AppState>>) -> anyhow::Result<()> {
 
     let tick_rate = Duration::from_millis(100); // ~10fps
 
-    let result = run_loop(&mut terminal, state, tick_rate);
+    let result = run_loop(&mut terminal, state, tick_rate, firewall);
 
     // Restore terminal
     disable_raw_mode()?;
@@ -44,6 +47,7 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: Arc<RwLock<AppState>>,
     tick_rate: Duration,
+    firewall: &mut Firewall,
 ) -> anyhow::Result<()> {
     let mut filter_input: Option<String> = None; // Some = filter editing mode
     let mut table_state = TableState::default();
@@ -52,7 +56,8 @@ fn run_loop(
         // Draw
         terminal.draw(|f| {
             let app = state.read().unwrap();
-            draw_ui(f, &app, &filter_input, &mut table_state);
+            let blocked = firewall.blocked_ips().clone();
+            draw_ui(f, &app, &filter_input, &mut table_state, &blocked);
         })?;
 
         // Handle input
@@ -61,6 +66,37 @@ fn run_loop(
                 // Global: Ctrl+C always quits
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     return Ok(());
+                }
+
+                // Confirmation mode for block/unblock
+                {
+                    let has_pending = state.read().unwrap().pending_block.is_some();
+                    if has_pending {
+                        match key.code {
+                            KeyCode::Char('y') => {
+                                let action = state.write().unwrap().pending_block.take();
+                                if let Some(action) = action {
+                                    match action {
+                                        BlockAction::Block { ips, .. } => {
+                                            for ip in ips {
+                                                firewall.block_ip(ip);
+                                            }
+                                        }
+                                        BlockAction::Unblock { ips, .. } => {
+                                            for ip in ips {
+                                                firewall.unblock_ip(ip);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Char('n') | KeyCode::Esc => {
+                                state.write().unwrap().pending_block = None;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                 }
 
                 // Detail view mode
@@ -214,9 +250,20 @@ fn run_loop(
                     KeyCode::Char(' ') | KeyCode::Char('f') => {
                         navigate(&state, &mut table_state, page_size as i32);
                     }
-                    // Page up: b
+                    // Page up: b in Process view only; Connection/Domain use b for block
                     KeyCode::Char('b') => {
-                        navigate(&state, &mut table_state, -(page_size as i32));
+                        let view = state.read().unwrap().view_mode;
+                        match view {
+                            ViewMode::Process => {
+                                navigate(&state, &mut table_state, -(page_size as i32));
+                            }
+                            ViewMode::Connection => {
+                                handle_block_connection(&state, &table_state, firewall);
+                            }
+                            ViewMode::Domain => {
+                                handle_block_domain(&state, &table_state, firewall);
+                            }
+                        }
                     }
                     // Half page: d(down), u(up)
                     KeyCode::Char('d') => {
@@ -298,6 +345,57 @@ fn run_loop(
     }
 }
 
+/// Initiate block/unblock for the selected connection row.
+fn handle_block_connection(
+    state: &Arc<RwLock<AppState>>,
+    table_state: &TableState,
+    firewall: &Firewall,
+) {
+    let selected = match table_state.selected() {
+        Some(s) => s,
+        None => return,
+    };
+
+    let app = state.read().unwrap();
+    if let Some((ip, label)) = views::connection::selected_ip(&app, selected) {
+        let action = if firewall.is_blocked(&ip) {
+            BlockAction::Unblock { ips: vec![ip], label }
+        } else {
+            BlockAction::Block { ips: vec![ip], label }
+        };
+        drop(app);
+        state.write().unwrap().pending_block = Some(action);
+    }
+}
+
+/// Initiate block/unblock for all IPs of the selected domain row.
+fn handle_block_domain(
+    state: &Arc<RwLock<AppState>>,
+    table_state: &TableState,
+    firewall: &Firewall,
+) {
+    let selected = match table_state.selected() {
+        Some(s) => s,
+        None => return,
+    };
+
+    let app = state.read().unwrap();
+    if let Some((hostname, ips)) = views::domain::selected_domain_ips(&app, selected) {
+        if ips.is_empty() {
+            return;
+        }
+        let all_blocked = ips.iter().all(|ip| firewall.is_blocked(ip));
+        let ip_list: Vec<IpAddr> = ips.into_iter().collect();
+        let action = if all_blocked {
+            BlockAction::Unblock { ips: ip_list, label: hostname }
+        } else {
+            BlockAction::Block { ips: ip_list, label: hostname }
+        };
+        drop(app);
+        state.write().unwrap().pending_block = Some(action);
+    }
+}
+
 enum NavTarget {
     Top,
     Bottom,
@@ -360,7 +458,13 @@ fn navigate_to(state: &Arc<RwLock<AppState>>, table_state: &mut TableState, targ
     }
 }
 
-fn draw_ui(f: &mut ratatui::Frame, app: &AppState, filter_input: &Option<String>, table_state: &mut TableState) {
+fn draw_ui(
+    f: &mut ratatui::Frame,
+    app: &AppState,
+    filter_input: &Option<String>,
+    table_state: &mut TableState,
+    blocked_ips: &HashSet<IpAddr>,
+) {
     // Detail view takes over the whole screen
     if app.detail_pid.is_some() {
         views::detail::render(f, f.area(), app);
@@ -379,7 +483,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &AppState, filter_input: &Option<String>
         .split(size);
 
     draw_stats_bar(f, chunks[0], app);
-    draw_main_content(f, chunks[1], app, table_state);
+    draw_main_content(f, chunks[1], app, table_state, blocked_ips);
     draw_help_bar(f, chunks[2], app, filter_input);
 }
 
@@ -434,11 +538,17 @@ fn draw_stats_bar(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     f.render_widget(paragraph, area);
 }
 
-fn draw_main_content(f: &mut ratatui::Frame, area: Rect, app: &AppState, table_state: &mut TableState) {
+fn draw_main_content(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    app: &AppState,
+    table_state: &mut TableState,
+    blocked_ips: &HashSet<IpAddr>,
+) {
     match app.view_mode {
         ViewMode::Process => views::process::render(f, area, app, table_state),
-        ViewMode::Connection => views::connection::render(f, area, app, table_state),
-        ViewMode::Domain => views::domain::render(f, area, app, table_state),
+        ViewMode::Connection => views::connection::render(f, area, app, table_state, blocked_ips),
+        ViewMode::Domain => views::domain::render(f, area, app, table_state, blocked_ips),
     }
 }
 
@@ -448,6 +558,35 @@ fn draw_help_bar(
     app: &AppState,
     filter_input: &Option<String>,
 ) {
+    // Confirmation mode takes over the help bar
+    if let Some(ref action) = app.pending_block {
+        let (verb, ips, label) = match action {
+            BlockAction::Block { ips, label } => ("Block", ips, label),
+            BlockAction::Unblock { ips, label } => ("Unblock", ips, label),
+        };
+        let prompt = if ips.len() == 1 {
+            let ip = &ips[0];
+            if label.contains(':') || label == &ip.to_string() {
+                format!(" {} {}?", verb, ip)
+            } else {
+                format!(" {} {} ({})?", verb, ip, label)
+            }
+        } else {
+            format!(" {} {} IPs for {}?", verb, ips.len(), label)
+        };
+        let spans = vec![
+            Span::styled(prompt, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled("[y]", Style::default().fg(Color::Green)),
+            Span::raw("es  "),
+            Span::styled("[n]", Style::default().fg(Color::Red)),
+            Span::raw("o"),
+        ];
+        let line = Line::from(spans);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
     let spans = if let Some(ref input) = filter_input {
         // Filter editing mode
         vec![
@@ -494,6 +633,11 @@ fn draw_help_bar(
             Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
             Span::raw(format!("View:{} ", app.view_mode.label())),
         ];
+        // Show [b]Block/Unblock in Connection and Domain views
+        if matches!(app.view_mode, ViewMode::Connection | ViewMode::Domain) {
+            s.push(Span::styled("[b]", Style::default().fg(Color::Yellow)));
+            s.push(Span::raw("Block "));
+        }
         if let Some(ref filter) = app.filter {
             s.push(Span::styled(
                 format!("  /{}", filter),

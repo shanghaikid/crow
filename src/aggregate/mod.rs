@@ -4,8 +4,8 @@ pub mod proxy;
 pub mod state;
 
 pub use state::{
-    AppState, Connection, ConnectionRoute, Direction, DnsInfo, PacketEvent, PacketLogEntry,
-    ProcessInfo, Protocol, TcpState, ViewMode,
+    AppState, BlockAction, Connection, ConnectionRoute, Direction, DnsInfo, PacketEvent,
+    PacketLogEntry, ProcessInfo, Protocol, TcpState, ViewMode,
 };
 
 use std::sync::mpsc;

@@ -1,5 +1,6 @@
 mod aggregate;
 mod capture;
+mod firewall;
 mod process;
 mod tui;
 
@@ -12,6 +13,7 @@ use clap::Parser;
 
 use aggregate::AppState;
 use capture::CaptureMode;
+use firewall::Firewall;
 
 /// crow — real-time per-process network monitor for macOS
 #[derive(Parser)]
@@ -38,6 +40,9 @@ fn main() -> Result<()> {
         app_state.filter = Some(filter.clone());
     }
     let state = Arc::new(RwLock::new(app_state));
+
+    // Load firewall blocklist from disk and apply existing rules
+    let mut firewall = Firewall::load();
 
     // Open capture
     let (cap, mode) = if cli.interface == "pktap,all" {
@@ -78,7 +83,10 @@ fn main() -> Result<()> {
         .context("Failed to spawn aggregator thread")?;
 
     // Run TUI on the main thread (blocks until quit)
-    let tui_result = tui::run_tui(state);
+    let tui_result = tui::run_tui(state, &mut firewall);
+
+    // Clean up firewall rules on exit
+    firewall.cleanup();
 
     // TUI exited — the capture thread is blocked in pcap::next_packet()
     // which is an uninterruptible C call. Exit the process directly.

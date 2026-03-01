@@ -1,6 +1,7 @@
 //! Domain view: grouped by destination hostname, showing which processes connect.
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 
 use ratatui::layout::Constraint;
 use ratatui::style::{Color, Modifier, Style};
@@ -14,13 +15,14 @@ use crate::tui::widgets::format_bytes;
 
 struct DomainEntry {
     processes: HashSet<String>,
+    ips: HashSet<IpAddr>,
     total_tx: u64,
     total_rx: u64,
     conn_count: usize,
 }
 
-pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, table_state: &mut TableState) {
-    // Aggregate connections by hostname
+/// Build sorted domain list (shared logic for render + selection).
+fn build_sorted(state: &AppState) -> Vec<(String, DomainEntry)> {
     let mut domains: HashMap<String, DomainEntry> = HashMap::new();
     let filter_lower = state.filter.as_ref().map(|f| f.to_lowercase());
 
@@ -28,7 +30,6 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, tabl
         for conn in &proc_info.connections {
             let hostname = conn.remote_display();
 
-            // Apply filter
             if let Some(ref fl) = filter_lower {
                 if !hostname.to_lowercase().contains(fl.as_str())
                     && !proc_info.name.to_lowercase().contains(fl.as_str())
@@ -39,19 +40,20 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, tabl
 
             let entry = domains.entry(hostname).or_insert_with(|| DomainEntry {
                 processes: HashSet::new(),
+                ips: HashSet::new(),
                 total_tx: 0,
                 total_rx: 0,
                 conn_count: 0,
             });
 
             entry.processes.insert(proc_info.name.clone());
+            entry.ips.insert(conn.remote_addr.ip());
             entry.total_tx += conn.bytes_tx;
             entry.total_rx += conn.bytes_rx;
             entry.conn_count += 1;
         }
     }
 
-    // Sort
     let sort_by = state.domain_sort_by;
     let desc = state.domain_sort_desc;
     let mut sorted: Vec<(String, DomainEntry)> = domains.into_iter().collect();
@@ -65,17 +67,58 @@ pub fn render(f: &mut Frame, area: ratatui::layout::Rect, state: &AppState, tabl
         if desc { ord.reverse() } else { ord }
     });
 
+    sorted
+}
+
+/// Get the hostname and all IPs for the currently selected domain row.
+pub fn selected_domain_ips(state: &AppState, selected: usize) -> Option<(String, HashSet<IpAddr>)> {
+    let sorted = build_sorted(state);
+    sorted
+        .into_iter()
+        .nth(selected)
+        .map(|(hostname, entry)| (hostname, entry.ips))
+}
+
+pub fn render(
+    f: &mut Frame,
+    area: ratatui::layout::Rect,
+    state: &AppState,
+    table_state: &mut TableState,
+    blocked_ips: &HashSet<IpAddr>,
+) {
+    let sorted = build_sorted(state);
+
     let rows: Vec<Row> = sorted
         .iter()
         .map(|(hostname, entry)| {
+            let any_blocked = entry.ips.iter().any(|ip| blocked_ips.contains(ip));
+            let all_blocked = !entry.ips.is_empty() && entry.ips.iter().all(|ip| blocked_ips.contains(ip));
+
+            let domain_display = if all_blocked {
+                format!("[B] {}", hostname)
+            } else if any_blocked {
+                format!("[b] {}", hostname)
+            } else {
+                hostname.clone()
+            };
+
+            let domain_style = if all_blocked {
+                Style::default().fg(Color::Red)
+            } else if any_blocked {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+
             let mut procs: Vec<&str> = entry.processes.iter().map(|s| s.as_str()).collect();
             procs.sort();
+
             Row::new(vec![
-                hostname.clone(),
-                procs.join(", "),
-                entry.conn_count.to_string(),
-                format_bytes(entry.total_tx),
-                format_bytes(entry.total_rx),
+                Cell::from(Span::styled(domain_display, domain_style)),
+                Cell::from(procs.join(", ")),
+                Cell::from(entry.conn_count.to_string()),
+                Cell::from(format_bytes(entry.total_tx)),
+                Cell::from(format_bytes(entry.total_rx)),
             ])
         })
         .collect();

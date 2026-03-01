@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::time::Instant;
 
 use super::counter::RollingCounter;
@@ -297,6 +297,12 @@ impl DomainSortBy {
     }
 }
 
+/// Pending firewall block/unblock action awaiting confirmation.
+pub enum BlockAction {
+    Block { ips: Vec<IpAddr>, label: String },
+    Unblock { ips: Vec<IpAddr>, label: String },
+}
+
 /// Which TUI view is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
@@ -350,6 +356,8 @@ pub struct AppState {
     /// When set, show full-screen packet log for this PID.
     pub detail_pid: Option<u32>,
     pub detail_scroll: usize,
+    /// Pending firewall block/unblock awaiting user confirmation.
+    pub pending_block: Option<BlockAction>,
     pub started_at: Instant,
     pub local_ip: String,
 }
@@ -377,6 +385,7 @@ impl AppState {
             filter: None,
             detail_pid: None,
             detail_scroll: 0,
+            pending_block: None,
             local_ip: get_local_ip(),
             started_at: Instant::now(),
         }
