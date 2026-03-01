@@ -162,8 +162,11 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
         .map(|s| s.to_string());
 
     // Find existing connection or create new one
+    // QUIC packets should match existing UDP connections (and upgrade them)
     let conn = proc_info.connections.iter_mut().find(|c| {
-        c.remote_addr == remote_addr && c.local_addr == local_addr && c.protocol == event.protocol
+        c.remote_addr == remote_addr
+            && c.local_addr == local_addr
+            && protocols_compatible(c.protocol, event.protocol)
     });
 
     match conn {
@@ -174,6 +177,10 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
             }
             if hostname.is_some() {
                 c.remote_hostname = hostname;
+            }
+            // Upgrade UDP → QUIC when we detect QUIC traffic
+            if event.protocol == Protocol::Quic && c.protocol == Protocol::Udp {
+                c.protocol = Protocol::Quic;
             }
         }
         None => {
@@ -193,6 +200,16 @@ fn process_event(app: &mut AppState, event: PacketEvent) {
             });
         }
     }
+}
+
+/// Check if two protocols are compatible for connection matching.
+/// QUIC runs over UDP, so a QUIC packet should match a UDP connection.
+fn protocols_compatible(a: Protocol, b: Protocol) -> bool {
+    a == b
+        || matches!(
+            (a, b),
+            (Protocol::Quic, Protocol::Udp) | (Protocol::Udp, Protocol::Quic)
+        )
 }
 
 /// Discover processes from the socket snapshot that aren't yet tracked.

@@ -17,6 +17,7 @@ pub enum Direction {
 pub enum Protocol {
     Tcp,
     Udp,
+    Quic,
     Icmp,
     Other(u8),
 }
@@ -116,6 +117,7 @@ impl Connection {
         match self.protocol {
             Protocol::Tcp => "TCP",
             Protocol::Udp => "UDP",
+            Protocol::Quic => "QUIC",
             Protocol::Icmp => "ICMP",
             Protocol::Other(_) => "OTHER",
         }
