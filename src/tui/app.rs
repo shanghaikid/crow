@@ -250,19 +250,21 @@ fn run_loop(
                     KeyCode::Char(' ') | KeyCode::Char('f') => {
                         navigate(&state, &mut table_state, page_size as i32);
                     }
-                    // Page up: b in Process view only; Connection/Domain use b for block
+                    // Page up: b
                     KeyCode::Char('b') => {
+                        navigate(&state, &mut table_state, -(page_size as i32));
+                    }
+                    // Block/Unblock: B (Connection and Domain views)
+                    KeyCode::Char('B') => {
                         let view = state.read().unwrap().view_mode;
                         match view {
-                            ViewMode::Process => {
-                                navigate(&state, &mut table_state, -(page_size as i32));
-                            }
                             ViewMode::Connection => {
                                 handle_block_connection(&state, &table_state, firewall);
                             }
                             ViewMode::Domain => {
                                 handle_block_domain(&state, &table_state, firewall);
                             }
+                            _ => {}
                         }
                     }
                     // Half page: d(down), u(up)
@@ -633,9 +635,9 @@ fn draw_help_bar(
             Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
             Span::raw(format!("View:{} ", app.view_mode.label())),
         ];
-        // Show [b]Block/Unblock in Connection and Domain views
+        // Show [B]Block/Unblock in Connection and Domain views
         if matches!(app.view_mode, ViewMode::Connection | ViewMode::Domain) {
-            s.push(Span::styled("[b]", Style::default().fg(Color::Yellow)));
+            s.push(Span::styled("[B]", Style::default().fg(Color::Yellow)));
             s.push(Span::raw("Block "));
         }
         if let Some(ref filter) = app.filter {
